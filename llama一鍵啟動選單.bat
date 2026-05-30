@@ -45,7 +45,7 @@ llama-server.exe ^
  -ngl 99 ^
  --n-cpu-moe 999 ^
  --flash-attn on ^
- -c 131072 ^
+ -c 262144 ^
  -t 16 ^
  -b 2048 ^
  -ub 2048 ^

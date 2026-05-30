@@ -97,10 +97,11 @@ llama-server.exe ^
  -ngl 99 ^
  --n-cpu-moe 999 ^
  --flash-attn on ^
- -c 32768 ^
+--parallel 1 ^
+ -c 262144 ^
  -t 16 ^
- -b 512 ^
- -ub 128 ^
+ -b 2048 ^
+ -ub 2048 ^
  --cache-type-k q4_0 ^
  --cache-type-v q4_0 ^
  --mlock ^

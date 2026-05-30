@@ -70,7 +70,7 @@ llama-server.exe ^
  -ngl 999 ^
   --n-cpu-moe 9 ^
  --flash-attn on ^
- -c 8192 ^
+ -c 16384 ^
  -t 16 ^
  -b 64 ^
  -ub 64 ^

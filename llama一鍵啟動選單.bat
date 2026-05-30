@@ -42,11 +42,11 @@ echo --------------------------------------------------
 llama-server.exe ^
  -m "models\Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" ^
  --mmproj "models\mmproj-BF16.gguf" ^
- -ngl 99 ^
- --n-cpu-moe 999 ^
+ -ngl 64 ^
+ --n-cpu-moe 99 ^
  --flash-attn on ^
 --parallel 1 ^
- -c 262144 ^
+ -c 131072 ^
  -t 16 ^
  -b 4096 ^
  -ub 4096 ^

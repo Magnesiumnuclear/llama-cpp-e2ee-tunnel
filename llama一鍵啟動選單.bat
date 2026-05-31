@@ -74,8 +74,8 @@ llama-server.exe ^
   --parallel 1 ^
  -c 65536 ^
  -t 16 ^
- -b 512 ^
- -ub 521 ^
+ -b 256 ^
+ -ub 256 ^
  --cache-type-k q4_0 ^
  --cache-type-v q4_0 ^
  --mlock ^
@@ -120,17 +120,18 @@ echo --------------------------------------------------
 llama-server.exe ^
  -m "models\Qwen3.6-35B-A3B-UD-Q4_K_M.gguf" ^
  --mmproj "models\mmproj-BF16.gguf" ^
- -ngl 99 ^
-  --n-cpu-moe 999 ^
+ -ngl 64 ^
+ --n-cpu-moe 99 ^
  --flash-attn on ^
- --jinja ^
- -c 16384 ^
- -n 2048 ^
- -b 512 ^
- -ub 128 ^
+--parallel 1 ^
+ -c 131072 ^
+ -t 16 ^
+ -b 4096 ^
+ -ub 4096 ^
  --cache-type-k q4_0 ^
  --cache-type-v q4_0 ^
  --mlock ^
+  --jinja ^
  --host 127.0.0.1 ^
  --port 8080
 pause

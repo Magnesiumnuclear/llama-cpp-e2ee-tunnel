@@ -4,4 +4,4 @@ __pycache__/
 .venv/
 
 # 排除 cloudflared.exe 的檔案
-cloudflared.exe
+cloudflared-windows-386.exe

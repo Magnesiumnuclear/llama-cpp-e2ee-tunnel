@@ -2,3 +2,6 @@
 __pycache__/
 *.py[cod]
 .venv/
+
+# 排除 cloudflared.exe 的檔案
+cloudflared.exe

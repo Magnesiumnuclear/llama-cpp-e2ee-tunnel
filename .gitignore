@@ -1,0 +1,4 @@
+# 排除 Python 編譯快取與虛擬環境
+__pycache__/
+*.py[cod]
+.venv/

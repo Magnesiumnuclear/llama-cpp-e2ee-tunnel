@@ -924,7 +924,8 @@ func main() {
 	log.Println("==================================================")
 
 	// 從環境變量讀取公網 URL（未設定則使用 localhost 作為預設）
-	publicURL = os.Getenv("LLAMA_PUBLIC_URL")
+	// TrimSpace 清理尾端空白，避免複製 Cloudflare URL 時帶入空格/換行，導致 QR URL 出現 "...com /auth/register"
+	publicURL = strings.TrimSpace(os.Getenv("LLAMA_PUBLIC_URL"))
 	if publicURL == "" {
 		publicURL = "http://127.0.0.1:8081"
 		log.Println("⚠️  LLAMA_PUBLIC_URL 未設定，QR Code 將使用 localhost URL")

@@ -34,7 +34,7 @@
 | `registerDeviceHandler()` | 設備註冊（手機掃碼後） |
 | `approveAccountHandler()` | 電腦端核准帳號 |
 | `authMiddleware()` | JWT 驗證中間件 |
-| `proxyHandler()` | 反向代理轉發到 llama.cpp |
+| `proxyToLlamaAuthenticated()` | 認證後反向代理到 llama.cpp |
 
 ## 技術棧
 
@@ -50,4 +50,5 @@
 ## 當前實作狀態
 
 ✅ QR Code 一次性驗證  ✅ JWT（90 天）  ✅ 審計日誌  ✅ SQLite 資料庫
+✅ 強制認證中間件（所有路由）  ✅ QR Code URL 格式  ✅ 資料庫自動 Migration
 ⏳ 端到端加密  ⏳ L1/L2/L3 權限中間件  ⏳ Token 計費  ⏳ 資源限制隊列

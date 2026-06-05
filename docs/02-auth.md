@@ -15,7 +15,7 @@
   POST /admin/generate-qr → 生成 temp_key → 存入 qr_codes 表 → 輸出 QR 圖片
 
 階段 2：手機掃描
-  解析 QR Code → 取得 temp_key + account_id
+  解析 QR Code URL → 瀏覽器自動跳轉到 /auth/register?temp_key=...&account_id=...
 
 階段 3：手機發送註冊請求
   POST /auth/register → { temp_key, device_id }
@@ -61,15 +61,16 @@
 }
 ```
 
-## QR Code 包含的欄位
+## QR Code 內容格式
 
-```json
-{
-  "temp_key": "a1b2c3d4e5f6...",
-  "account_id": "user_001",
-  "expires_at": "2026-06-05T12:00:00Z"
-}
+QR Code 編碼的是 **URL 格式**，手機掃描後即直接跳轉到註冊頁面：
+
 ```
+https://your-tunnel.trycloudflare.com/auth/register?temp_key=a1b2c3d4...&account_id=user_001
+```
+
+公網 URL 由環境變量 `LLAMA_PUBLIC_URL` 控制（見 [08-quickstart.md](08-quickstart.md)）。
+未設定時預設為 `http://127.0.0.1:8081`（僅適合本機測試）。
 
 ## 錯誤情境
 

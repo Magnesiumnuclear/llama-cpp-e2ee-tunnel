@@ -29,6 +29,7 @@ var (
 	db           *sql.DB
 	serverSecret []byte // JWT 簽名密鑰
 	mu           sync.Mutex
+	publicURL    string // 對外公網 URL（Cloudflare Tunnel）
 )
 
 // ============================================================
@@ -207,6 +208,17 @@ func initDB() error {
 		return err
 	}
 
+	// 自動補齊舊資料庫可能缺少的欄位（忽略「column already exists」錯誤）
+	migrations := []string{
+		"ALTER TABLE audit_logs ADD COLUMN ip_address TEXT",
+		"ALTER TABLE audit_logs ADD COLUMN device_id TEXT",
+		"ALTER TABLE audit_logs ADD COLUMN request_data TEXT",
+		"ALTER TABLE audit_logs ADD COLUMN response_data TEXT",
+	}
+	for _, m := range migrations {
+		db.Exec(m) // 忽略錯誤：欄位已存在時 SQLite 會回傳錯誤，屬正常情況
+	}
+
 	log.Println("✓ 資料庫表格建立完成")
 	return nil
 }
@@ -252,6 +264,11 @@ func extractToken(r *http.Request) string {
 // 認證中間件：檢查用戶是否已登入
 func authMiddleware(next http.HandlerFunc, requiredLevel string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 防止 Header 偽造：清除客戶端傳入的內部 Header
+		r.Header.Del("X-Account-ID")
+		r.Header.Del("X-Device-ID")
+		r.Header.Del("X-Permission")
+
 		tokenString := extractToken(r)
 		if tokenString == "" {
 			sendJSON(w, http.StatusUnauthorized, APIResponse{
@@ -445,9 +462,9 @@ func generateQRHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// QR Code 內容
-	qrContent := fmt.Sprintf(`{"temp_key":"%s","account_id":"%s","expires_at":"%s"}`,
-		tempKey, req.AccountID, expiresAt.Format(time.RFC3339))
+	// QR Code 內容（URL 格式，手機掃描後直接跳轉到註冊頁面）
+	qrContent := fmt.Sprintf("%s/auth/register?temp_key=%s&account_id=%s",
+		publicURL, tempKey, req.AccountID)
 
 	// 生成 QR Code 圖像
 	filename := fmt.Sprintf("qrcode_%s.png", req.AccountID)
@@ -620,16 +637,47 @@ func listAccountsHandler(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, http.StatusOK, APIResponse{Status: "success", Data: accounts})
 }
 
+// 驗證 Token（手機端可用此端點確認 token 是否有效）
+func verifyTokenHandler(w http.ResponseWriter, r *http.Request) {
+	accountID := r.Header.Get("X-Account-ID")
+	deviceID := r.Header.Get("X-Device-ID")
+	permission := r.Header.Get("X-Permission")
+
+	// 取得 token 過期時間
+	tokenString := extractToken(r)
+	claims, err := validateJWT(tokenString)
+	if err != nil {
+		sendJSON(w, http.StatusUnauthorized, APIResponse{Status: "error", Error: "Token 無效"})
+		return
+	}
+
+	sendJSON(w, http.StatusOK, APIResponse{
+		Status: "valid",
+		Data: map[string]string{
+			"account_id": accountID,
+			"device_id":  deviceID,
+			"permission": permission,
+			"expires_at": claims.ExpiresAt.Time.Format("2006-01-02 15:04:05"),
+		},
+	})
+}
+
 // 查看審計日誌
 func viewLogsHandler(w http.ResponseWriter, r *http.Request) {
-	limit := r.URL.Query().Get("limit")
-	if limit == "" {
-		limit = "50"
+	limitStr := r.URL.Query().Get("limit")
+	if limitStr == "" {
+		limitStr = "50"
+	}
+	// 限制為純數字，防止 SQL Injection
+	limitVal := 50
+	fmt.Sscanf(limitStr, "%d", &limitVal)
+	if limitVal <= 0 || limitVal > 1000 {
+		limitVal = 50
 	}
 
 	rows, err := db.Query(`
 		SELECT log_id, account_id, operation, resource, ip_address, device_id, timestamp, status, reason
-		FROM audit_logs ORDER BY timestamp DESC LIMIT ` + limit)
+		FROM audit_logs ORDER BY timestamp DESC LIMIT ?`, limitVal)
 	if err != nil {
 		sendJSON(w, http.StatusInternalServerError, APIResponse{Status: "error", Error: err.Error()})
 		return
@@ -742,6 +790,12 @@ func proxyToLlamaAuthenticated(w http.ResponseWriter, r *http.Request) {
 	accountID := r.Header.Get("X-Account-ID")
 	log.Printf("🔄 代理轉發: account=%s, path=%s\n", accountID, r.URL.Path)
 
+	// 移除內部 Header，不暴露給 llama.cpp
+	r.Header.Del("X-Account-ID")
+	r.Header.Del("X-Device-ID")
+	r.Header.Del("X-Permission")
+	r.Header.Del("Authorization")
+
 	llamaURL, _ := url.Parse("http://127.0.0.1:8080")
 	proxy := httputil.NewSingleHostReverseProxy(llamaURL)
 	proxy.ServeHTTP(w, r)
@@ -783,8 +837,18 @@ func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
 	log.Println("==================================================")
-	log.Println("llama.cpp 代理層啟動（階段 2：認證版）")
+	log.Println("llama.cpp 代理層啟動（階段 3：強制認證版）")
 	log.Println("==================================================")
+
+	// 從環境變量讀取公網 URL（未設定則使用 localhost 作為預設）
+	publicURL = os.Getenv("LLAMA_PUBLIC_URL")
+	if publicURL == "" {
+		publicURL = "http://127.0.0.1:8081"
+		log.Println("⚠️  LLAMA_PUBLIC_URL 未設定，QR Code 將使用 localhost URL")
+		log.Println("   請設定: $env:LLAMA_PUBLIC_URL = \"https://your-tunnel.trycloudflare.com\"")
+	} else {
+		log.Printf("✓ 公網 URL: %s\n", publicURL)
+	}
 
 	// 生成伺服器密鑰（生產環境應從文件/環境變量讀取）
 	serverSecret = []byte(generateSecureKey(32))
@@ -812,12 +876,13 @@ func main() {
 	http.HandleFunc("/admin/logs", viewLogsHandler)
 
 	// 需認證的端點
+	http.HandleFunc("/auth/verify", authMiddleware(verifyTokenHandler, "L1"))
 	http.HandleFunc("/api/chat", authMiddleware(chatHandler, "L2"))
 	http.HandleFunc("/api/conversations", authMiddleware(myConversationsHandler, "L1"))
 	http.HandleFunc("/api/llama/", authMiddleware(proxyToLlamaAuthenticated, "L2"))
 
-	// 所有其他請求（暫時公開代理到 llama.cpp Web UI）
-	http.HandleFunc("/", proxyToLlamaPublic)
+	// 所有其他請求（強制認證後轉發到 llama.cpp Web UI）
+	http.HandleFunc("/", authMiddleware(proxyToLlamaAuthenticated, "L1"))
 
 	// 啟動
 	port := ":8081"
@@ -839,8 +904,11 @@ func main() {
 	log.Printf("   聊天:         POST http://127.0.0.1%s/api/chat\n", port)
 	log.Printf("   我的對話:     GET  http://127.0.0.1%s/api/conversations\n", port)
 	log.Println("")
-	log.Println("🌐 llama.cpp Web UI:")
-	log.Printf("   http://127.0.0.1%s/\n", port)
+	log.Println("🔒 需認證端點（Bearer Token 必填）:")
+	log.Printf("   驗證 Token:     GET  http://127.0.0.1%s/auth/verify\n", port)
+	log.Println("")
+	log.Println("🌐 llama.cpp Web UI（需認證）:")
+	log.Printf("   http://127.0.0.1%s/  ← 需帶 Authorization: Bearer <token>\n", port)
 	log.Println("")
 
 	if err := http.ListenAndServe(port, loggingMiddleware(http.DefaultServeMux)); err != nil {

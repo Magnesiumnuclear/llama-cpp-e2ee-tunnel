@@ -1,6 +1,6 @@
 # HTTP API 端點參考
 
-基礎 URL：`http://127.0.0.1:8081`
+基礎 URL：`http://127.0.0.1:8081`（本機） / `https://your-tunnel.trycloudflare.com`（公網）
 
 ## 公開端點（無需認證）
 
@@ -84,7 +84,8 @@ Content-Type: application/json
 
 {
   "account_id": "user_001",
-  "permission_level": "L2"
+  "permission": "L2",      // L1 / L2 / L3，預設 L2
+  "action": "approve"     // 或 "reject"，預設 approve
 }
 ```
 
@@ -92,7 +93,13 @@ Content-Type: application/json
 ```json
 {
   "status": "success",
-  "data": { "session_token": "eyJ..." }
+  "data": {
+    "account_id": "user_001",
+    "permission": "L2",
+    "session_token": "eyJ...",
+    "refresh_token": "eyJ...",
+    "expires_at": "2026-09-03 14:00:00"
+  }
 }
 ```
 
@@ -118,9 +125,12 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:8081/auth/verify
 ```json
 {
   "status": "valid",
-  "account_id": "user_001",
-  "device_id": "iPhone-UUID-12345",
-  "permission": "L2"
+  "data": {
+    "account_id": "user_001",
+    "device_id": "iPhone-UUID-12345",
+    "permission": "L2",
+    "expires_at": "2026-09-03 14:00:00"
+  }
 }
 ```
 
@@ -128,11 +138,14 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:8081/auth/verify
 
 ### GET / (及所有 /api/*) — 代理到 llama.cpp
 
+> ⚠️ **所有請求都需要認證**，包括 `GET /`。未攜帶 Token 將回傳 401。
+
 ```bash
 curl -H "Authorization: Bearer <token>" http://127.0.0.1:8081/
 ```
 
 攜帶有效 Token 時，請求被轉發到 `http://127.0.0.1:8080`。
+內部 Header（`X-Account-ID`、`Authorization`）不會被轉發給 llama.cpp。
 
 ---
 

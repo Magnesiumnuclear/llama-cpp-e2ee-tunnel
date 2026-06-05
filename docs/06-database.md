@@ -99,6 +99,12 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 );
 ```
 
+## 資料庫 Migration
+
+啟動時 `initDB()` 會自動對舊資料庫執行 `ALTER TABLE` 補齊缺少的欄位，**不需要手動操作或删除資料庫**。欄位已存在時 SQLite 回傳錯誤會被安全忽略。
+
+目前轉移項目：`audit_logs.ip_address`、`audit_logs.device_id`、`audit_logs.request_data`、`audit_logs.response_data`
+
 ## 保留與存取政策
 
 | 表 | 保留期限 | 查詢權限 |

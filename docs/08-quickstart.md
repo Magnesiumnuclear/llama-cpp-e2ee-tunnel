@@ -17,7 +17,19 @@ go mod download
 go mod tidy
 ```
 
-### Step 2：編譯並運行
+### Step 2：設定環境變量（必須）
+
+```powershell
+# 設定 Cloudflare Tunnel 公網 URL（每次開新 terminal 必需設定）
+$env:LLAMA_PUBLIC_URL = "https://your-tunnel.trycloudflare.com"
+
+# 沒有 Cloudflare，本機測試用：
+# $env:LLAMA_PUBLIC_URL = "http://127.0.0.1:8081"
+```
+
+> **為何必填**：QR Code 編碼的是 URL 格式。未設定時手機掃描後的跳轉目的地會是 localhost，外網無法存取。
+
+### Step 3：編譯並運行
 
 ```powershell
 # 開發模式（直接運行）
@@ -31,7 +43,9 @@ go build -o llama-proxy.exe main.go
 啟動成功後應看到：
 
 ```
-llama.cpp 代理層啟動
+llama.cpp 代理層啟動（階段 3：強制認證版）
+✓ 公網 URL: https://your-tunnel.trycloudflare.com
+✓ 伺服器密鑰已生成
 ✓ SQLite 連接成功
 ✓ 資料庫表格建立完成
 🚀 代理層監聽在 :8081
@@ -84,5 +98,11 @@ go get github.com/golang-jwt/jwt/v5
 
 **Q：SQLite 編譯錯誤（CGO）**
 需安裝 GCC，或使用 `go-sqlite3` 的純 Go 替代方案。
+
+**Q：舊資料庫報 `table audit_logs has no column named ip_address`**
+不需要删除資料庫。程式啟動時會自動執行 `ALTER TABLE` 補齊缺少的欄位。
+
+**Q：QR Code 掃出來是 JSON 而非 URL**
+請確認環境變量 `LLAMA_PUBLIC_URL` 已設定，且對应的是公網可存取的 URL。
 
 → API 端點完整列表見 [07-api.md](07-api.md)

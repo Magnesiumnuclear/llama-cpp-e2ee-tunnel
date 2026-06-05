@@ -182,7 +182,8 @@ class ControlPanel(QMainWindow):
         v = QVBoxLayout(w)
         row = QHBoxLayout()
         row.addWidget(QLabel("account_id："))
-        self.qr_account = QLineEdit("user_phone_001")
+        self.qr_account = QLineEdit()
+        self.qr_account.setPlaceholderText("留空＝自動產生新帳號；或自訂名稱（如 使用者A手機、user_phone_002）")
         row.addWidget(self.qr_account, 1)
         btn = QPushButton("生成 QR")
         btn.clicked.connect(self.gen_qr)
@@ -365,7 +366,7 @@ class ControlPanel(QMainWindow):
         base = self.public_url or PROXY_BASE
         reg = f"{base}/auth/register?temp_key={d.get('temp_key','')}&account_id={d.get('account_id','')}"
         self.qr_url.setText(reg)
-        self.qr_expire.setText(f"有效期至：{d.get('expires_at','')}")
+        self.qr_expire.setText(f"帳號：{d.get('account_id','')}　|　有效期至：{d.get('expires_at','')}")
         self.log_line(f"🔑 QR 生成：{d.get('account_id','')}（有效期 {d.get('expires_at','')}）")
 
     # ── 權限審核 ───────────────────────────────────────────────

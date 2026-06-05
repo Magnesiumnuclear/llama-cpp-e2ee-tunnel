@@ -15,29 +15,39 @@
   POST /admin/generate-qr → 生成 temp_key → 存入 qr_codes 表 → 輸出 QR 圖片
 
 階段 2：手機掃描
-  解析 QR Code URL → 瀏覽器自動跳轉到 /auth/register?temp_key=...&account_id=...
+  解析 QR Code URL → 瀏覽器跳轉到 /auth/register?temp_key=...&account_id=...
+  → 伺服器返回認證頁面（HTML）
 
 階段 3：手機發送註冊請求
-  POST /auth/register → { temp_key, device_id }
+  頁面自動 POST /auth/register → { temp_key, device_id }
+  ← 伺服器回傳 device_secret（一次性，存於頁面記憶體）
 
-階段 4：電腦驗證 temp_key
+階段 4：代理層驗證 temp_key
   查 qr_codes 表：有效 / 未用 / 未過期
   → 標記 used = true
   → 建立 pending_approval 帳號
 
+階段 4.5：手機輪詢核准狀態
+  每 2.5 秒 GET /auth/poll?account_id=xxx&device_secret=xxx
+  ← 回傳 { status: "pending_approval" }，直到管理員操作
+
 階段 5：電腦端管理員核准
   POST /admin/approve → 設定權限（預設 L2）
   → 生成 session_token（JWT 90天）+ refresh_token（2年）
-  → 回傳給手機
+  → 存入 sessions 資料表
 
-階段 6：手機接收並存儲
-  將 session_token 存入 IndexedDB（後續加密保護）
+階段 6：手機收到核准通知
+  /auth/poll 回傳 { status: "approved" }
+  → 伺服器設置 HttpOnly Cookie（session_token，90 天）
+  → 瀏覽器自動重導向至 /（Cookie 由瀏覽器自動攜帶）
 
 階段 7：之後的每個請求
-  Authorization: Bearer <session_token>
+  Authorization: Bearer <session_token>  （API 呼叫）
+  或瀏覽器自動攜帶 Cookie               （Web UI）
 
 階段 8：代理層驗證
-  authMiddleware → validateJWT → 設置 X-Account-ID / X-Permission Header
+  authMiddleware → validateJWT → 查帳號狀態 → 檢查權限
+  → 設置 X-Account-ID / X-Device-ID / X-Permission Header
 ```
 
 ## 帳號狀態機
@@ -79,6 +89,9 @@ https://your-tunnel.trycloudflare.com/auth/register?temp_key=a1b2c3d4...&account
 | temp_key 不存在 | 404 | 無效密鑰 |
 | temp_key 已使用 | 409 | 一次性限制 |
 | temp_key 已過期 | 410 | 超過 1 小時 |
+| device_secret 不符 | 403 | 輪詢時身分驗證失敗 |
+| 帳號不存在 | 404 | 輪詢時找不到帳號 |
 | JWT 無效 | 401 | 簽名錯誤或過期 |
+| 帳號非 active | 403 | 未核准或已停用 |
 
 → API 端點詳見 [07-api.md](07-api.md)

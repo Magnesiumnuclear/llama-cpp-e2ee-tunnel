@@ -34,11 +34,45 @@ Content-Type: application/json
 {
   "status": "success",
   "message": "設備已註冊，等待電腦端核准",
-  "data": { "account_id": "user_001", "status": "pending_approval" }
+  "data": {
+    "account_id": "user_001",
+    "status": "pending_approval",
+    "device_secret": "a3f9..."
+  }
 }
 ```
 
+> **`device_secret`** 用於輪詢核准狀態（`/auth/poll`），僅此一次回傳，請保存於頁面記憶體中。
+
 錯誤碼：`404` 無效密鑰 | `409` 已使用 | `410` 已過期
+
+---
+
+### GET /auth/poll — 手機端輪詢核准狀態
+
+```bash
+GET /auth/poll?account_id=user_001&device_secret=a3f9...
+```
+
+回應（待審批）：
+```json
+{ "status": "success", "data": { "status": "pending_approval" } }
+```
+
+回應（已核准）：
+```json
+{ "status": "success", "data": { "status": "approved" } }
+```
+
+> 核准時伺服器會同時設置 **HttpOnly Cookie**（`session_token`），瀏覽器後續請求將自動攜帶。
+> 手機頁面收到 `approved` 後自動重導向至 `/`。
+
+回應（rejected / disabled）：
+```json
+{ "status": "success", "data": { "status": "rejected" } }
+```
+
+錯誤碼：`403` device_secret 不符 | `404` 找不到帳號
 
 ---
 
@@ -76,6 +110,16 @@ curl http://127.0.0.1:8081/admin/pending
 
 ---
 
+### GET /admin/accounts — 查看所有帳號
+
+```bash
+curl http://127.0.0.1:8081/admin/accounts
+```
+
+回應欄位：`account_id`、`device_id`、`permission`、`status`、`created_at`、`approved_at`、`last_login`
+
+---
+
 ### POST /admin/approve — 核准帳號
 
 ```bash
@@ -108,7 +152,9 @@ Content-Type: application/json
 ### GET /admin/logs — 查看審計日誌
 
 ```bash
+# 預設最新 50 筆；?limit=N 可調整（上限 1000）
 curl http://127.0.0.1:8081/admin/logs
+curl http://127.0.0.1:8081/admin/logs?limit=100
 ```
 
 ---
@@ -136,7 +182,26 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:8081/auth/verify
 
 ---
 
-### GET / (及所有 /api/*) — 代理到 llama.cpp
+### POST /api/chat — 發送聊天訊息（需 L2+）
+
+```bash
+curl -H "Authorization: Bearer <token>" \
+     -H "Content-Type: application/json" \
+     -d '{"message": "你好"}' \
+     http://127.0.0.1:8081/api/chat
+```
+
+---
+
+### GET /api/conversations — 查看自己的對話記錄（需 L1+）
+
+```bash
+curl -H "Authorization: Bearer <token>" http://127.0.0.1:8081/api/conversations
+```
+
+---
+
+### GET / 及 /api/llama/* — 代理到 llama.cpp Web UI（需 L1+）
 
 > ⚠️ **所有請求都需要認證**，包括 `GET /`。未攜帶 Token 將回傳 401。
 
@@ -145,7 +210,15 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:8081/
 ```
 
 攜帶有效 Token 時，請求被轉發到 `http://127.0.0.1:8080`。
-內部 Header（`X-Account-ID`、`Authorization`）不會被轉發給 llama.cpp。
+內部 Header（`X-Account-ID`、`X-Device-ID`、`X-Permission`、`Authorization`）不會被轉發給 llama.cpp。
+
+| 路由 | 最低權限 | 說明 |
+|------|---------|------|
+| `/` | L1 | llama.cpp Web UI 首頁 |
+| `/api/llama/*` | L2 | llama.cpp API 端點 |
+| `/api/chat` | L2 | 代理層聊天（附審計） |
+| `/api/conversations` | L1 | 對話歷史查詢 |
+| `/auth/verify` | L1 | Token 狀態確認 |
 
 ---
 

@@ -31,9 +31,15 @@
 |------|------|
 | `initDB()` | 建立 SQLite 資料表 |
 | `generateQRHandler()` | 生成 QR Code（管理端） |
-| `registerDeviceHandler()` | 設備註冊（手機掃碼後） |
-| `approveAccountHandler()` | 電腦端核准帳號 |
-| `authMiddleware()` | JWT 驗證中間件 |
+| `registerDeviceHandler()` | 設備註冊（GET 返回 HTML 頁面；POST 驗證 temp_key） |
+| `pollStatusHandler()` | 手機輪詢核准狀態，核准時種 HttpOnly Cookie |
+| `approveAccountHandler()` | 電腦端核准 / 拒絕帳號 |
+| `listAccountsHandler()` | 列出所有帳號 |
+| `viewLogsHandler()` | 查看審計日誌（支援 ?limit=N） |
+| `chatHandler()` | 聊天端點（L2+，附審計日誌） |
+| `myConversationsHandler()` | 查詢自己的對話記錄（L1+） |
+| `authMiddleware()` | JWT 驗證 + 帳號狀態 + 權限等級中間件 |
+| `checkPermission()` | L1/L2/L3 等級比較（userLevel >= requiredLevel） |
 | `proxyToLlamaAuthenticated()` | 認證後反向代理到 llama.cpp |
 
 ## 技術棧
@@ -51,4 +57,5 @@
 
 ✅ QR Code 一次性驗證  ✅ JWT（90 天）  ✅ 審計日誌  ✅ SQLite 資料庫
 ✅ 強制認證中間件（所有路由）  ✅ QR Code URL 格式  ✅ 資料庫自動 Migration
-⏳ 端到端加密  ⏳ L1/L2/L3 權限中間件  ⏳ Token 計費  ⏳ 資源限制隊列
+✅ L1/L2/L3 權限中間件  ✅ 手機端輪詢核准（HttpOnly Cookie）
+⏳ 端到端加密  ⏳ Token 計費  ⏳ 資源限制隊列

@@ -30,13 +30,17 @@
 | 函式 | 職責 |
 |------|------|
 | `initDB()` | 建立 SQLite 資料表 |
+| `loadOrGenerateRSAKeyPair()` | 啟動時自動載入或生成 RSA-2048 E2E 密鑰對 |
+| `decryptE2ERequest()` | E2E 解密：HMAC 驗證 → RSA-OAEP 解密 → AES-256-GCM 解密 |
 | `generateQRHandler()` | 生成 QR Code（管理端） |
 | `registerDeviceHandler()` | 設備註冊（GET 返回 HTML 頁面；POST 驗證 temp_key） |
 | `pollStatusHandler()` | 手機輪詢核准狀態，核准時種 HttpOnly Cookie |
 | `approveAccountHandler()` | 電腦端核准 / 拒絕帳號 |
 | `listAccountsHandler()` | 列出所有帳號 |
+| `accountSecretsHandler()` | 取得帳號 session_token + device_secret（供控制面板 E2E 測試用） |
 | `viewLogsHandler()` | 查看審計日誌（支援 ?limit=N） |
-| `chatHandler()` | 聊天端點（L2+，附審計日誌） |
+| `publicKeyHandler()` | 回傳伺服器 RSA E2E 公鑰（SPKI PEM） |
+| `chatHandler()` | 聊天端點（L2+，支援明文與 E2E 加密，附審計日誌） |
 | `myConversationsHandler()` | 查詢自己的對話記錄（L1+） |
 | `authMiddleware()` | JWT 驗證 + 帳號狀態 + 權限等級中間件 |
 | `checkPermission()` | L1/L2/L3 等級比較（userLevel >= requiredLevel） |
@@ -49,7 +53,7 @@
 | 語言 | Go |
 | 資料庫 | SQLite（WAL 模式） |
 | 認證 | JWT HS256 + QR Code 一次性密鑰 |
-| 加密 | RSA + AES-256-GCM + HMAC-SHA256（待實作） |
+| 加密 | RSA-2048-OAEP + AES-256-GCM + HMAC-SHA256 |
 | 網路 | Cloudflare Tunnel（HTTPS） |
 | 手機端 | 純網頁 + IndexedDB |
 

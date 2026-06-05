@@ -17,6 +17,37 @@ curl http://127.0.0.1:8081/health
 
 ---
 
+### GET /api/public-key — 取得伺服器 RSA E2E 公鑰
+
+前端加密前必須先呼叫此端點取得 RSA-2048 SPKI PEM 公鑰，用於 RSA-OAEP 加密每次請求的一次性 `dialogue_key`。
+
+```bash
+curl http://127.0.0.1:8081/api/public-key
+```
+
+回應：
+```json
+{
+  "status": "success",
+  "data": { "public_key": "-----BEGIN PUBLIC KEY-----\nMII...\n-----END PUBLIC KEY-----\n" }
+}
+```
+
+---
+
+### GET /e2e-test — E2E 加密測試網頁（開發用）
+
+提供互動式 Web Crypto API 測試工具，支援 URL 參數自動填入憑證（由控制面板傳入）。
+
+```
+GET /e2e-test
+GET /e2e-test?token=eyJ...&secret=a3f9...   ← 控制面板點「E2E 測試」按鈕時帶入
+```
+
+> ⚠️ 此頁面僅供開發使用，生產環境建議移除對此路由的服務。
+
+---
+
 ### POST /auth/register — 設備註冊（手機掃碼後調用）
 
 ```bash
@@ -159,6 +190,32 @@ curl http://127.0.0.1:8081/admin/logs?limit=100
 
 ---
 
+### GET /admin/account-secrets — 取得帳號憑證（供控制面板 E2E 測試用）
+
+回傳指定 `active` 帳號的最新 `session_token` 與 `device_secret`，供控制面板一鍵開啟 E2E 測試頁使用。
+
+```bash
+curl "http://127.0.0.1:8081/admin/account-secrets?account_id=user_001"
+```
+
+回應（成功）：
+```json
+{
+  "status": "success",
+  "data": {
+    "account_id": "user_001",
+    "session_token": "eyJ...",
+    "device_secret": "a3f9b2c1..."
+  }
+}
+```
+
+錯誤碼：`400` 缺少 account_id | `403` 帳號非 active | `404` 帳號不存在 | `500` 找不到 Session
+
+> ⚠️ 此端點回傳高敏感資料，生產環境**必須**額外加上 IP 白名單（僅允許 127.0.0.1 存取）。
+
+---
+
 ## 需認證的端點（Bearer Token）
 
 ### GET /auth/verify — 驗證 Token
@@ -184,12 +241,27 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:8081/auth/verify
 
 ### POST /api/chat — 發送聊天訊息（需 L2+）
 
+同時支援**明文**與 **E2E 加密**兩種格式，根據請求 body 是否含 `encrypted_key` 欄位自動切換。
+
+**明文格式（向後相容）：**
 ```bash
 curl -H "Authorization: Bearer <token>" \
      -H "Content-Type: application/json" \
      -d '{"message": "你好"}' \
      http://127.0.0.1:8081/api/chat
 ```
+
+**E2E 加密格式（推薦）：**
+```json
+{
+  "encrypted_key":  "<base64: RSA-OAEP 加密的 AES-256 dialogue_key>",
+  "ciphertext":     "<base64: AES-256-GCM 密文，末尾含 16-byte GCM tag>",
+  "nonce":          "<base64: 12-byte AES-GCM nonce>",
+  "hmac_signature": "<base64: HMAC-SHA256，簽名對象：b64(encrypted_key).b64(nonce).b64(ciphertext)>"
+}
+```
+
+→ E2E 加密細節見 [04-encryption.md](04-encryption.md)
 
 ---
 

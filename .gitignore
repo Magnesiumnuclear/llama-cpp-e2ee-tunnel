@@ -49,3 +49,7 @@ __pycache__/
 # 臨時檔案
 *.tmp
 *.temp
+# SQLite 運行時文件
+*.db-shm
+*.db-wal
+*.db

@@ -1,11 +1,19 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/x509"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
@@ -27,10 +35,11 @@ import (
 // ============================================================
 
 var (
-	db           *sql.DB
-	serverSecret []byte // JWT 簽名密鑰
-	mu           sync.Mutex
-	publicURL    string // 對外公網 URL（Cloudflare Tunnel）
+	db               *sql.DB
+	serverSecret     []byte          // JWT 簽名密鑰
+	serverE2EPrivKey *rsa.PrivateKey // E2E RSA-2048 私鑰（啟動時載入或自動生成）
+	mu               sync.Mutex
+	publicURL        string // 對外公網 URL（Cloudflare Tunnel）
 )
 
 // ============================================================
@@ -51,6 +60,14 @@ type CustomClaims struct {
 	DeviceID   string `json:"device_id"`
 	Permission string `json:"permission"`
 	jwt.RegisteredClaims
+}
+
+// E2E 加密請求格式（手機端發送，伺服器解密）
+type E2ERequest struct {
+	EncryptedKey  string `json:"encrypted_key"`  // base64: RSA-OAEP 加密的 AES-256 dialogue_key
+	Ciphertext    string `json:"ciphertext"`     // base64: AES-256-GCM 密文（末尾含 16-byte GCM tag）
+	Nonce         string `json:"nonce"`          // base64: 12-byte AES-GCM nonce
+	HMACSignature string `json:"hmac_signature"` // base64: HMAC-SHA256（以 device_secret 為密鑰）
 }
 
 // ============================================================
@@ -114,6 +131,134 @@ func sendJSON(w http.ResponseWriter, statusCode int, resp APIResponse) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(resp)
+}
+
+// ============================================================
+// E2E 加密 — RSA 密鑰管理與解密
+// ============================================================
+
+// loadOrGenerateRSAKeyPair 啟動時自動載入或生成伺服器 RSA-2048 密鑰對。
+// 私鑰以 PKCS#8 PEM 格式存於 server_private.pem（mode 0600，僅擁有者可讀）。
+// 公鑰存於 server_public.pem（mode 0644），同時透過 GET /api/public-key 提供給前端。
+func loadOrGenerateRSAKeyPair() error {
+	const privPath = "server_private.pem"
+	const pubPath = "server_public.pem"
+
+	// 嘗試從磁碟載入已存在的私鑰
+	if data, err := os.ReadFile(privPath); err == nil {
+		block, _ := pem.Decode(data)
+		if block != nil {
+			key, parseErr := x509.ParsePKCS8PrivateKey(block.Bytes)
+			if parseErr == nil {
+				if rsaKey, ok := key.(*rsa.PrivateKey); ok {
+					serverE2EPrivKey = rsaKey
+					log.Println("✓ RSA E2E 私鑰已從磁碟載入")
+					return nil
+				}
+			}
+			log.Printf("⚠️  RSA 私鑰解析失敗，重新生成: %v\n", parseErr)
+		}
+	}
+
+	// 生成新的 RSA-2048 密鑰對
+	log.Println("🔑 生成 RSA-2048 E2E 密鑰對...")
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("RSA 密鑰生成失敗: %w", err)
+	}
+
+	// 序列化私鑰（PKCS#8 DER → PEM）並寫入磁碟（mode 0600 僅擁有者可讀）
+	privDER, err := x509.MarshalPKCS8PrivateKey(privKey)
+	if err != nil {
+		return fmt.Errorf("私鑰序列化失敗: %w", err)
+	}
+	privPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDER})
+	if err := os.WriteFile(privPath, privPEM, 0600); err != nil {
+		return fmt.Errorf("私鑰寫入 %s 失敗: %w", privPath, err)
+	}
+
+	// 序列化公鑰（SPKI DER → PEM）並寫入磁碟
+	pubDER, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
+	if err != nil {
+		return fmt.Errorf("公鑰序列化失敗: %w", err)
+	}
+	pubPEM := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})
+	if err := os.WriteFile(pubPath, pubPEM, 0644); err != nil {
+		return fmt.Errorf("公鑰寫入 %s 失敗: %w", pubPath, err)
+	}
+
+	serverE2EPrivKey = privKey
+	log.Printf("✓ RSA E2E 密鑰對已生成並儲存（%s / %s）\n", privPath, pubPath)
+	return nil
+}
+
+// decryptE2ERequest 解密手機端發來的 E2E 加密請求，回傳明文 JSON bytes。
+//
+// 安全流程（必須全部通過）：
+//  1. Base64 解碼各欄位
+//  2. HMAC-SHA256 驗證（以 deviceSecret 為密鑰，constant-time 比較，防止竄改與 timing attack）
+//  3. RSA-OAEP（SHA-256）解密 encrypted_key，取得一次性 AES-256 dialogue_key
+//  4. AES-256-GCM 解密 ciphertext（GCM tag 驗證確保密文完整性），取得明文 JSON
+func decryptE2ERequest(e2eReq E2ERequest, deviceSecret string) ([]byte, error) {
+	// 1. Base64 解碼各欄位
+	encKey, err := base64.StdEncoding.DecodeString(e2eReq.EncryptedKey)
+	if err != nil {
+		return nil, fmt.Errorf("encrypted_key base64 解碼失敗: %w", err)
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(e2eReq.Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("ciphertext base64 解碼失敗: %w", err)
+	}
+	nonce, err := base64.StdEncoding.DecodeString(e2eReq.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("nonce base64 解碼失敗: %w", err)
+	}
+	sig, err := base64.StdEncoding.DecodeString(e2eReq.HMACSignature)
+	if err != nil {
+		return nil, fmt.Errorf("hmac_signature base64 解碼失敗: %w", err)
+	}
+
+	// 2. HMAC-SHA256 驗證
+	// 簽名對象：base64(encrypted_key) + "." + base64(nonce) + "." + base64(ciphertext)
+	// 此格式與前端 Web Crypto API 實作完全一致，任意欄位被竄改都會驗證失敗
+	mac := hmac.New(sha256.New, []byte(deviceSecret))
+	mac.Write([]byte(e2eReq.EncryptedKey + "." + e2eReq.Nonce + "." + e2eReq.Ciphertext))
+	expected := mac.Sum(nil)
+	if !hmac.Equal(expected, sig) {
+		return nil, fmt.Errorf("HMAC 驗證失敗：請求可能被竄改或 device_secret 不符")
+	}
+
+	// 3. RSA-OAEP（SHA-256）解密 dialogue_key
+	if serverE2EPrivKey == nil {
+		return nil, fmt.Errorf("伺服器 E2E 私鑰尚未初始化")
+	}
+	dialogueKey, err := rsa.DecryptOAEP(sha256.New(), rand.Reader, serverE2EPrivKey, encKey, nil)
+	if err != nil {
+		return nil, fmt.Errorf("RSA-OAEP 解密 dialogue_key 失敗: %w", err)
+	}
+	if len(dialogueKey) != 32 {
+		return nil, fmt.Errorf("dialogue_key 長度無效（應為 32 bytes，實際 %d bytes）", len(dialogueKey))
+	}
+
+	// 4. AES-256-GCM 解密（GCM tag 自動驗證密文完整性）
+	block, err := aes.NewCipher(dialogueKey)
+	if err != nil {
+		return nil, fmt.Errorf("AES cipher 初始化失敗: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("AES-GCM 初始化失敗: %w", err)
+	}
+	if len(nonce) != gcm.NonceSize() {
+		return nil, fmt.Errorf("nonce 長度無效（應為 %d bytes，實際 %d bytes）", gcm.NonceSize(), len(nonce))
+	}
+	// ciphertext 末尾 16 bytes 為 GCM authentication tag，gcm.Open 自動驗證並去除
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("AES-256-GCM 解密失敗（密文或 GCM tag 被竄改）: %w", err)
+	}
+
+	return plaintext, nil
 }
 
 // ============================================================
@@ -351,6 +496,28 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /api/public-key — 返回伺服器 RSA E2E 公鑰（SPKI PEM 格式）
+// 前端使用此公鑰以 RSA-OAEP 加密每次對話的一次性 dialogue_key（AES-256）
+func publicKeyHandler(w http.ResponseWriter, r *http.Request) {
+	if serverE2EPrivKey == nil {
+		sendJSON(w, http.StatusServiceUnavailable, APIResponse{
+			Status: "error",
+			Error:  "E2E 密鑰尚未初始化，請稍後再試",
+		})
+		return
+	}
+	pubDER, err := x509.MarshalPKIXPublicKey(&serverE2EPrivKey.PublicKey)
+	if err != nil {
+		sendJSON(w, http.StatusInternalServerError, APIResponse{Status: "error", Error: "公鑰序列化失敗"})
+		return
+	}
+	pubPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER}))
+	sendJSON(w, http.StatusOK, APIResponse{
+		Status: "success",
+		Data:   map[string]string{"public_key": pubPEM},
+	})
+}
+
 // 設備註冊（手機掃 QR Code 後調用）
 // GET /auth/register?temp_key=xxx&account_id=xxx → 返回 HTML 頁面，頁面自動完成 POST 流程
 func registerDeviceHandler(w http.ResponseWriter, r *http.Request) {
@@ -533,8 +700,9 @@ func registerDeviceHandler(w http.ResponseWriter, r *http.Request) {
 
 // 手機端輪詢審批狀態（公開端點，用 device_secret 授權，免認證）
 // GET /auth/poll?account_id=xxx&device_secret=xxx
-//   pending_approval → {status:"pending..."}；rejected/disabled → {status:<status>}
-//   active → Set-Cookie(session_token, HttpOnly) + {status:"approved"}
+//
+//	pending_approval → {status:"pending..."}；rejected/disabled → {status:<status>}
+//	active → Set-Cookie(session_token, HttpOnly) + {status:"approved"}
 func pollStatusHandler(w http.ResponseWriter, r *http.Request) {
 	accountID := r.URL.Query().Get("account_id")
 	deviceSecret := r.URL.Query().Get("device_secret")
@@ -870,9 +1038,59 @@ func viewLogsHandler(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, http.StatusOK, APIResponse{Status: "success", Data: logs})
 }
 
+// GET /admin/account-secrets?account_id=xxx
+// 供控制面板「E2E 測試」按鈕使用：回傳指定帳號的最新 session_token 與 device_secret。
+// ⚠️  此端點僅供 localhost 管理員使用，生產環境應額外加 IP 白名單保護。
+func accountSecretsHandler(w http.ResponseWriter, r *http.Request) {
+	accountID := r.URL.Query().Get("account_id")
+	if accountID == "" {
+		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "account_id 為必填"})
+		return
+	}
+
+	// 確認帳號存在且為 active 狀態
+	var status, deviceSecret string
+	err := db.QueryRow(
+		"SELECT status, device_secret FROM accounts WHERE account_id = ?", accountID,
+	).Scan(&status, &deviceSecret)
+	if err != nil {
+		sendJSON(w, http.StatusNotFound, APIResponse{Status: "error", Error: "找不到此帳號"})
+		return
+	}
+	if status != "active" {
+		sendJSON(w, http.StatusForbidden, APIResponse{
+			Status: "error",
+			Error:  fmt.Sprintf("帳號狀態為 %s，非 active，無法取得測試憑證", status),
+		})
+		return
+	}
+
+	// 取得最新一筆 session_token
+	var sessionToken string
+	err = db.QueryRow(
+		"SELECT session_token FROM sessions WHERE account_id = ? ORDER BY created_at DESC LIMIT 1",
+		accountID,
+	).Scan(&sessionToken)
+	if err != nil {
+		sendJSON(w, http.StatusInternalServerError, APIResponse{Status: "error", Error: "找不到此帳號的 Session，請重新核准"})
+		return
+	}
+
+	logAudit("admin", "fetch_account_secrets", accountID, r.RemoteAddr, "", "success", "e2e_test_open")
+	sendJSON(w, http.StatusOK, APIResponse{
+		Status: "success",
+		Data: map[string]string{
+			"account_id":    accountID,
+			"session_token": sessionToken,
+			"device_secret": deviceSecret,
+		},
+	})
+}
+
 // --- 需認證的端點 ---
 
 // 聊天（需要 L2+ 權限）
+// 同時支援明文請求與 E2E 加密請求（根據是否含 encrypted_key 欄位自動判斷）
 func chatHandler(w http.ResponseWriter, r *http.Request) {
 	accountID := r.Header.Get("X-Account-ID")
 	deviceID := r.Header.Get("X-Device-ID")
@@ -882,25 +1100,79 @@ func chatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Message string `json:"message"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-
-	if req.Message == "" {
-		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "message 為必填"})
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "讀取請求體失敗"})
 		return
 	}
 
-	log.Printf("💬 收到聊天請求: account=%s, message=%s\n", accountID, req.Message)
-	logAudit(accountID, "chat", "llama", r.RemoteAddr, deviceID, "success", "")
+	// 解析最外層 JSON，判斷是 E2E 加密請求還是明文請求
+	var rawMap map[string]json.RawMessage
+	if err := json.Unmarshal(bodyBytes, &rawMap); err != nil {
+		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "無效的 JSON 格式"})
+		return
+	}
+
+	var message string
+	if _, isE2E := rawMap["encrypted_key"]; isE2E {
+		// ── E2E 加密請求 ─────────────────────────────────────────────
+		var e2eReq E2ERequest
+		if err := json.Unmarshal(bodyBytes, &e2eReq); err != nil {
+			sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "E2E 請求格式無效"})
+			return
+		}
+		if e2eReq.EncryptedKey == "" || e2eReq.Ciphertext == "" || e2eReq.Nonce == "" || e2eReq.HMACSignature == "" {
+			sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "E2E 請求缺少必要欄位（encrypted_key/ciphertext/nonce/hmac_signature）"})
+			return
+		}
+
+		// 從資料庫取得 device_secret 用於 HMAC 驗證
+		var deviceSecret string
+		if dbErr := db.QueryRow("SELECT device_secret FROM accounts WHERE account_id = ?", accountID).Scan(&deviceSecret); dbErr != nil {
+			sendJSON(w, http.StatusInternalServerError, APIResponse{Status: "error", Error: "無法取得 device_secret"})
+			logAudit(accountID, "chat_e2e", "llama", r.RemoteAddr, deviceID, "denied", "device_secret_query_failed")
+			return
+		}
+
+		// E2E 解密：HMAC 驗證 → RSA-OAEP 解密 → AES-256-GCM 解密
+		plainBytes, decErr := decryptE2ERequest(e2eReq, deviceSecret)
+		if decErr != nil {
+			sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "E2E 解密失敗: " + decErr.Error()})
+			logAudit(accountID, "chat_e2e", "llama", r.RemoteAddr, deviceID, "denied", decErr.Error())
+			return
+		}
+
+		// 解析解密後的明文 JSON 取得 message
+		var inner struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(plainBytes, &inner); err != nil || inner.Message == "" {
+			sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "解密後 JSON 格式無效或 message 為空"})
+			return
+		}
+		message = inner.Message
+		log.Printf("🔐 E2E 解密成功: account=%s\n", accountID)
+		logAudit(accountID, "chat_e2e", "llama", r.RemoteAddr, deviceID, "success", "e2e_decrypted")
+	} else {
+		// ── 明文請求（向後相容舊版客戶端）──────────────────────────
+		var plainReq struct {
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal(bodyBytes, &plainReq); err != nil || plainReq.Message == "" {
+			sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "message 為必填"})
+			return
+		}
+		message = plainReq.Message
+		log.Printf("💬 明文聊天請求: account=%s\n", accountID)
+		logAudit(accountID, "chat", "llama", r.RemoteAddr, deviceID, "success", "plaintext")
+	}
 
 	// TODO: 轉發到 llama.cpp API 並記錄 token 用量
 	// 目前先回傳模擬回應
 	sendJSON(w, http.StatusOK, APIResponse{
 		Status: "success",
 		Data: map[string]interface{}{
-			"response":    "[代理層] 收到你的訊息: " + req.Message,
+			"response":    "[代理層] 收到你的訊息: " + message,
 			"account_id":  accountID,
 			"tokens_used": 0,
 			"note":        "尚未連接 llama.cpp API，這是測試回應",
@@ -1026,6 +1298,11 @@ func main() {
 	}
 	defer db.Close()
 
+	// 初始化 E2E RSA-2048 密鑰對（自動載入已有密鑰或生成新密鑰）
+	if err := loadOrGenerateRSAKeyPair(); err != nil {
+		log.Fatalf("E2E 密鑰初始化失敗: %v\n", err)
+	}
+
 	// ==================
 	// 路由設定
 	// ==================
@@ -1034,6 +1311,10 @@ func main() {
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/auth/register", registerDeviceHandler)
 	http.HandleFunc("/auth/poll", pollStatusHandler)
+	http.HandleFunc("/api/public-key", publicKeyHandler)                        // RSA E2E 公鑰（前端加密用）
+	http.HandleFunc("/e2e-test", func(w http.ResponseWriter, r *http.Request) { // E2E 加密測試頁（開發用）
+		http.ServeFile(w, r, "e2e_test.html")
+	})
 
 	// 管理端點（電腦端調用，生產環境應限制 IP）
 	http.HandleFunc("/admin/generate-qr", generateQRHandler)
@@ -1041,6 +1322,7 @@ func main() {
 	http.HandleFunc("/admin/approve", approveAccountHandler)
 	http.HandleFunc("/admin/accounts", listAccountsHandler)
 	http.HandleFunc("/admin/logs", viewLogsHandler)
+	http.HandleFunc("/admin/account-secrets", accountSecretsHandler) // 供控制面板取得 token+secret 開啟 E2E 測試頁
 
 	// 需認證的端點
 	http.HandleFunc("/auth/verify", authMiddleware(verifyTokenHandler, "L1"))
@@ -1066,6 +1348,7 @@ func main() {
 	log.Printf("   核准帳號:     POST http://127.0.0.1%s/admin/approve\n", port)
 	log.Printf("   所有帳號:     GET  http://127.0.0.1%s/admin/accounts\n", port)
 	log.Printf("   審計日誌:     GET  http://127.0.0.1%s/admin/logs\n", port)
+	log.Printf("   帳號憑證:     GET  http://127.0.0.1%s/admin/account-secrets?account_id=xxx\n", port)
 	log.Println("")
 	log.Println("🔒 需認證端點:")
 	log.Printf("   聊天:         POST http://127.0.0.1%s/api/chat\n", port)

@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>E2E 加密測試工具 — llama-proxy</title>
+<style>
+  :root {
+    --bg:    #1a1a2e;
+    --card:  #16213e;
+    --deep:  #0a0f1e;
+    --accent:#0f3460;
+    --blue:  #a0c4ff;
+    --green: #69f0ae;
+    --red:   #ff5252;
+    --yellow:#ffd740;
+    --text:  #e0e0e0;
+    --dim:   #888;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'Consolas', 'Cascadia Code', monospace;
+    padding: 1.5rem; min-height: 100vh;
+  }
+  h1 { color: var(--blue); font-size: 1.3rem; margin-bottom: 0.5rem; }
+  h2 { color: var(--blue); font-size: 0.95rem; margin-bottom: 0.75rem; letter-spacing: 0.03em; }
+  .warning {
+    background: #1a1000; border-left: 3px solid var(--yellow);
+    padding: 0.6rem 0.9rem; border-radius: 0 6px 6px 0;
+    font-size: 0.8rem; color: var(--yellow); margin-bottom: 1.25rem;
+  }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border-radius: 10px; padding: 1.2rem; }
+  .card + .card { margin-top: 1rem; }
+  label {
+    display: block; color: var(--dim); font-size: 0.78rem;
+    margin-bottom: 0.3rem; margin-top: 0.9rem;
+  }
+  label:first-child { margin-top: 0; }
+  input, textarea {
+    width: 100%; background: var(--accent); border: 1px solid #1e4080;
+    border-radius: 6px; color: var(--text); padding: 0.45rem 0.7rem;
+    font-family: inherit; font-size: 0.82rem; outline: none;
+  }
+  input:focus, textarea:focus { border-color: var(--blue); }
+  textarea { resize: vertical; min-height: 72px; }
+  .btn-row { display: flex; gap: 0.5rem; margin-top: 1rem; }
+  button {
+    flex: 1; background: var(--blue); color: #000; border: none;
+    border-radius: 6px; padding: 0.55rem 1rem; font-size: 0.88rem;
+    font-weight: bold; cursor: pointer; font-family: inherit;
+  }
+  button:hover { background: #c0d8ff; }
+  button:disabled { background: #333; color: var(--dim); cursor: not-allowed; }
+  button.secondary { background: #2a3a5e; color: var(--dim); font-weight: normal; }
+  button.secondary:hover { background: #364a6e; color: var(--text); }
+  #log, #response {
+    background: var(--deep); border-radius: 6px; padding: 0.75rem;
+    font-size: 0.77rem; line-height: 1.75; white-space: pre-wrap;
+    word-break: break-all; overflow-y: auto;
+  }
+  #log     { min-height: 240px; max-height: 420px; }
+  #response{ min-height: 80px;  max-height: 200px; }
+  .ok   { color: var(--green); }
+  .err  { color: var(--red); }
+  .dim  { color: var(--dim); }
+  .step { color: var(--blue); }
+  .warn { color: var(--yellow); }
+  .sep  { color: #2a3a5e; }
+</style>
+</head>
+<body>
+
+<h1>🔐 llama-proxy E2E 加密測試工具</h1>
+<div class="warning">
+  ⚠️ 此頁面僅供開發測試使用，請勿在生產環境中保留。<br>
+  device_secret 為高度敏感資料，請勿在公共場所輸入。
+</div>
+
+<div class="grid">
+
+  <!-- 左欄：輸入區 -->
+  <div>
+    <div class="card">
+      <h2>🔑 認證資訊</h2>
+
+      <label>session_token（JWT；核准後 /admin/approve 回傳，或留空使用 Cookie）</label>
+      <input type="password" id="sessionToken" placeholder="eyJ..." autocomplete="off">
+
+      <label>device_secret（設備註冊時 POST /auth/register 回傳的 data.device_secret）</label>
+      <input type="password" id="deviceSecret" placeholder="a3f9b2c1d4e5..." autocomplete="off">
+
+      <label>伺服器位址（預設為目前頁面的 origin）</label>
+      <input type="text" id="baseURL" placeholder="http://127.0.0.1:8081">
+    </div>
+
+    <div class="card">
+      <h2>💬 訊息內容</h2>
+      <label>要加密並發送的訊息（純文字）</label>
+      <textarea id="message">你好！這是 E2E 加密測試訊息。連 Cloudflare 都無法讀取此段明文。</textarea>
+
+      <div class="btn-row">
+        <button id="sendBtn" onclick="sendE2E()">🚀 發送 E2E 加密訊息</button>
+        <button class="secondary" onclick="clearAll()">清除</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>📨 伺服器回應</h2>
+      <div id="response"><span class="dim">等待發送...</span></div>
+    </div>
+  </div>
+
+  <!-- 右欄：加密流程日誌 -->
+  <div>
+    <div class="card" style="height:100%">
+      <h2>📋 加密流程日誌</h2>
+      <div id="log"><span class="dim">等待發送訊息，日誌將顯示於此...</span></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+'use strict';
+
+// ── URL 參數自動填入（控制面板一鍵開啟時自動帶入憑證）────────────────
+// 支援 ?token=xxx&secret=yyy，值為 URL-encoded（Python urllib.parse.quote 產生）
+(function autoFillFromURL() {
+  const p = new URLSearchParams(location.search);
+  const token  = p.get('token');
+  const secret = p.get('secret');
+  if (token)  document.getElementById('sessionToken').value = token;
+  if (secret) document.getElementById('deviceSecret').value = secret;
+  // 填入後立即清除 URL 中的敏感參數，防止 Referrer / 瀏覽器歷史洩漏
+  if (token || secret) {
+    history.replaceState(null, '', location.pathname);
+  }
+})();
+
+// ── 工具函數 ──────────────────────────────────────────────────────────
+
+/** ArrayBuffer / TypedArray → standard base64 (with padding, matches Go base64.StdEncoding) */
+function ab2b64(buf) {
+  const bytes = new Uint8Array(buf instanceof ArrayBuffer ? buf : buf.buffer, buf.byteOffset, buf.byteLength);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+/** 從 PEM 字串提取 DER ArrayBuffer（移除 header/footer 與所有空白） */
+function pemToDER(pem) {
+  const b64 = pem
+    .replace(/-----BEGIN[^-]*-----/g, '')
+    .replace(/-----END[^-]*-----/g, '')
+    .replace(/\s/g, '');
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes.buffer;
+}
+
+/** 取得頁面 origin 作為預設 base URL */
+function getBase() {
+  const v = document.getElementById('baseURL').value.trim();
+  return v || location.origin;
+}
+
+// ── 日誌 ──────────────────────────────────────────────────────────────
+
+const logEl = document.getElementById('log');
+
+function log(msg, cls = '') {
+  if (logEl.querySelector('.dim') && logEl.children.length === 1) logEl.innerHTML = '';
+  const span = document.createElement('span');
+  // 防止 XSS：使用 textContent 而非 innerHTML
+  span.textContent = msg + '\n';
+  if (cls) span.className = cls;
+  logEl.appendChild(span);
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+function logSep() { log('─'.repeat(50), 'sep'); }
+
+function clearAll() {
+  logEl.innerHTML = '<span class="dim">日誌已清除</span>';
+  document.getElementById('response').innerHTML = '<span class="dim">等待發送...</span>';
+}
+
+// ── 核心：E2E 加密並發送 ─────────────────────────────────────────────
+
+async function sendE2E() {
+  const btn          = document.getElementById('sendBtn');
+  const sessionToken = document.getElementById('sessionToken').value.trim();
+  const deviceSecret = document.getElementById('deviceSecret').value.trim();
+  const messageText  = document.getElementById('message').value.trim();
+  const base         = getBase();
+
+  // 基本驗證
+  if (!deviceSecret) { log('❌ 請填寫 device_secret', 'err'); return; }
+  if (!messageText)  { log('❌ 請填寫訊息內容', 'err'); return; }
+
+  btn.disabled = true;
+  logEl.innerHTML = '';
+  document.getElementById('response').innerHTML = '<span class="dim">處理中...</span>';
+
+  try {
+    logSep();
+    log('⏳ 開始 E2E 加密流程', 'step');
+    logSep();
+
+    // ── Step 1：取得伺服器 RSA E2E 公鑰 ──────────────────────────────
+    log('\nStep 1 ▸ 取得伺服器 RSA E2E 公鑰...', 'step');
+    const pkRes = await fetch(base + '/api/public-key');
+    if (!pkRes.ok) throw new Error('GET /api/public-key 失敗，HTTP ' + pkRes.status);
+    const pkData = await pkRes.json();
+    if (pkData.status !== 'success') throw new Error('公鑰端點錯誤: ' + (pkData.error || JSON.stringify(pkData)));
+    const serverPEM = pkData.data.public_key;
+    // 只顯示公鑰的前 20 字元（不敏感，但避免刷版）
+    log('         ✅ 公鑰取得成功 (' + serverPEM.split('\n')[1].slice(0, 20) + '...)', 'ok');
+
+    // ── Step 2：匯入 RSA 公鑰（SPKI / RSA-OAEP / SHA-256） ──────────
+    log('\nStep 2 ▸ 匯入 RSA-OAEP 公鑰（SHA-256）...', 'step');
+    const serverPubKey = await crypto.subtle.importKey(
+      'spki',
+      pemToDER(serverPEM),
+      { name: 'RSA-OAEP', hash: 'SHA-256' },
+      false,
+      ['encrypt']
+    );
+    log('         ✅ RSA-OAEP 公鑰匯入成功', 'ok');
+
+    // ── Step 3：生成隨機 256-bit AES-GCM dialogue_key ────────────────
+    log('\nStep 3 ▸ 生成本次一次性 dialogue_key（AES-256-GCM）...', 'step');
+    const dialogueKey = await crypto.subtle.generateKey(
+      { name: 'AES-GCM', length: 256 },
+      true,          // extractable = true，稍後需匯出給 RSA 加密
+      ['encrypt']
+    );
+    log('         ✅ 256-bit dialogue_key 生成完成（記憶體中，發送後即丟棄）', 'ok');
+
+    // ── Step 4：生成 12-byte 隨機 nonce ───────────────────────────────
+    const nonce    = crypto.getRandomValues(new Uint8Array(12));
+    const b64Nonce = ab2b64(nonce);
+    log('\nStep 4 ▸ 生成 12-byte nonce: ' + b64Nonce, 'step');
+
+    // ── Step 5：AES-256-GCM 加密訊息 ─────────────────────────────────
+    log('\nStep 5 ▸ AES-256-GCM 加密訊息...', 'step');
+    // 將 message 包裝為 JSON，伺服器解密後直接 json.Unmarshal
+    const plainJSON  = JSON.stringify({ message: messageText });
+    const ptBytes    = new TextEncoder().encode(plainJSON);
+    // Web Crypto 的 AES-GCM encrypt 會在密文末尾附加 16-byte GCM tag
+    // Go 的 gcm.Open() 也預期密文含 tag，兩者格式一致
+    const ctWithTag  = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv: nonce },
+      dialogueKey,
+      ptBytes
+    );
+    const b64Ciphertext = ab2b64(ctWithTag);
+    log('         ✅ 加密完成 | 明文 ' + ptBytes.length + ' bytes → 密文 ' + ctWithTag.byteLength + ' bytes（含 16-byte GCM tag）', 'ok');
+
+    // ── Step 6：RSA-OAEP 加密 dialogue_key ───────────────────────────
+    log('\nStep 6 ▸ RSA-OAEP 加密 dialogue_key（以伺服器公鑰）...', 'step');
+    const rawKey    = await crypto.subtle.exportKey('raw', dialogueKey);
+    // RSA-2048 + OAEP-SHA256 最大可加密 190 bytes；AES-256 key = 32 bytes，遠小於上限
+    const encKeyBuf = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, serverPubKey, rawKey);
+    const b64EncKey = ab2b64(encKeyBuf);
+    log('         ✅ dialogue_key 加密完成 | RSA 密文 ' + encKeyBuf.byteLength + ' bytes', 'ok');
+
+    // ── Step 7：HMAC-SHA256 簽名 ──────────────────────────────────────
+    // 簽名對象：base64(encrypted_key) + "." + base64(nonce) + "." + base64(ciphertext)
+    // ⚠️  此字串格式必須與 Go decryptE2ERequest 中的 HMAC 計算完全一致
+    log('\nStep 7 ▸ HMAC-SHA256 簽名（device_secret 為密鑰）...', 'step');
+    const hmacKey = await crypto.subtle.importKey(
+      'raw',
+      // device_secret 為 ASCII hex 字串，TextEncoder 產生 UTF-8（即 ASCII）bytes
+      new TextEncoder().encode(deviceSecret),
+      { name: 'HMAC', hash: 'SHA-256' },
+      false,
+      ['sign']
+    );
+    // 簽名字串與 Go 後端完全一致：三個 base64 欄位以 "." 分隔
+    const signInput = new TextEncoder().encode(b64EncKey + '.' + b64Nonce + '.' + b64Ciphertext);
+    const sigBuf    = await crypto.subtle.sign('HMAC', hmacKey, signInput);
+    const b64Sig    = ab2b64(sigBuf);
+    log('         ✅ HMAC 簽名完成', 'ok');
+
+    // ── Step 8：組裝 E2E Payload 並發送 POST /api/chat ───────────────
+    const payload = {
+      encrypted_key:  b64EncKey,
+      ciphertext:     b64Ciphertext,
+      nonce:          b64Nonce,
+      hmac_signature: b64Sig,
+    };
+    log('\nStep 8 ▸ 發送 POST /api/chat...', 'step');
+    log('         Payload 欄位：encrypted_key(' + b64EncKey.length + ' chars) ciphertext(' + b64Ciphertext.length + ' chars) nonce(' + b64Nonce.length + ' chars) hmac_signature(' + b64Sig.length + ' chars)', 'dim');
+
+    const headers = { 'Content-Type': 'application/json' };
+    // 若有明確填入 session_token 則使用 Bearer 認證；否則依賴 HttpOnly Cookie
+    if (sessionToken) headers['Authorization'] = 'Bearer ' + sessionToken;
+
+    const res     = await fetch(base + '/api/chat', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+      credentials: 'include', // 自動附帶 HttpOnly Cookie（核准後由伺服器種入）
+    });
+
+    const resData = await res.json();
+
+    logSep();
+    if (res.ok && resData.status === 'success') {
+      log('✅ E2E 解密成功！伺服器 HTTP ' + res.status, 'ok');
+      // 使用 textContent 顯示回應，避免 XSS
+      const respEl = document.getElementById('response');
+      respEl.innerHTML = '';
+      const span = document.createElement('span');
+      span.className = 'ok';
+      span.textContent = JSON.stringify(resData, null, 2);
+      respEl.appendChild(span);
+    } else {
+      const errMsg = resData.error || JSON.stringify(resData);
+      log('❌ 請求失敗 HTTP ' + res.status + ': ' + errMsg, 'err');
+      const respEl = document.getElementById('response');
+      respEl.innerHTML = '';
+      const span = document.createElement('span');
+      span.className = 'err';
+      span.textContent = JSON.stringify(resData, null, 2);
+      respEl.appendChild(span);
+    }
+
+  } catch (e) {
+    logSep();
+    log('❌ 例外錯誤: ' + e.message, 'err');
+    if (e.stack) log(e.stack, 'dim');
+  } finally {
+    btn.disabled = false;
+  }
+}
+</script>
+</body>
+</html>

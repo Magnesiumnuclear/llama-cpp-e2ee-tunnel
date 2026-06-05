@@ -1,38 +1,82 @@
 # 端到端加密（E2E）與密鑰管理
 
-> **目前狀態**：⏳ 待實作（架構設計完成）
+> **目前狀態**：✅ 已實作（後端解密 + 前端測試頁均完成）
 
 ## 加密算法組合
 
 | 用途 | 算法 |
 |------|------|
 | 訊息加密 | AES-256-GCM |
-| 密鑰傳輸 | RSA（手機公鑰加密 dialogue_key） |
+| 密鑰傳輸 | RSA-2048-OAEP（SHA-256）（手機用伺服器公鑰加密 dialogue_key） |
 | 請求完整性 | HMAC-SHA256（device_secret 簽名） |
-| 私鑰保護 | PBKDF2（密碼 → 衍生密鑰） + AES-256-GCM |
+| 私鑰保護 | PBKDF2（密碼 → 衍生密鑰）+ AES-256-GCM（IndexedDB 內儲存） |
+
+## 伺服器密鑰對（main.go 實作）
+
+| 檔案 | 內容 | 權限 |
+|------|------|------|
+| `server_private.pem` | RSA-2048 PKCS#8 私鑰 | 0600（僅擁有者可讀） |
+| `server_public.pem` | RSA-2048 SPKI 公鑰 | 0644 |
+
+啟動時 `loadOrGenerateRSAKeyPair()` 自動處理：
+- 若 `server_private.pem` 已存在：載入並驗證密鑰
+- 若不存在或解析失敗：自動生成新密鑰對並寫入磁碟
 
 ## 手機端加密流程（發送）
 
 ```
 明文訊息
-  → 生成本次 dialogue_key（隨機 AES 密鑰）
-  → AES-256-GCM 加密訊息（ciphertext + nonce + tag）
-  → HMAC-SHA256 簽名（用 device_secret）
-  → RSA 加密 dialogue_key（用伺服器 E2E 公鑰）
-  → 組裝請求 → HTTPS POST /chat
+  → 生成本次 dialogue_key（隨機 AES-256-GCM key，crypto.getRandomValues）
+  → 生成隨機 12-byte nonce
+  → AES-256-GCM 加密訊息（ciphertext 末尾含 16-byte GCM tag）
+  → RSA-2048-OAEP（SHA-256）加密 dialogue_key（用伺服器 E2E 公鑰）
+  → HMAC-SHA256 簽名（簽名對象：b64(encrypted_key).b64(nonce).b64(ciphertext)）
+  → 組裝請求 → HTTPS POST /api/chat
 ```
 
 ## 電腦端解密流程（接收）
 
 ```
-驗證 JWT session_token
-  → 查 device_secret → 驗證 HMAC 簽名
-  → RSA 解密 dialogue_key（用伺服器私鑰）
-  → AES 解密訊息 → 得明文
-  → 權限檢查 → 審計日誌 → 轉發 llama.cpp（本機明文）
+驗證 JWT session_token（authMiddleware）
+  → 檢查帳號狀態為 active
+  → 查 device_secret → HMAC-SHA256 驗證（constant-time 比較防 timing attack）
+  → RSA-2048-OAEP 解密 encrypted_key，取得 dialogue_key（32 bytes）
+  → AES-256-GCM 解密 ciphertext（GCM tag 驗證密文完整性）
+  → 得明文 JSON → 權限檢查 → 審計日誌 → 轉發 llama.cpp（本機明文）
 ```
 
-## Cloudflare 可見性
+## 實作相關檔案
+
+| 檔案 | 說明 |
+|------|------|
+| `main.go` | `loadOrGenerateRSAKeyPair()`、`decryptE2ERequest()`、`publicKeyHandler()` |
+| `e2e_test.html` | 前端測試頁（Web Crypto API，模擬手機端加密發送） |
+| `server_private.pem` | 伺服器 RSA 私鑰（自動生成，不入 git） |
+| `server_public.pem` | 伺服器 RSA 公鑰（自動生成） |
+
+## HTTP API
+
+| 端點 | 說明 |
+|------|------|
+| `GET /api/public-key` | 返回伺服器 RSA E2E 公鑰（SPKI PEM），公開無需認證 |
+| `POST /api/chat` | 同時支援明文請求與 E2E 加密請求，需 L2+ |
+| `GET /e2e-test` | E2E 測試頁（開發用） |
+
+### E2E Payload 格式
+
+```json
+{
+  "encrypted_key":  "<base64: RSA-OAEP 加密的 AES-256 dialogue_key>",
+  "ciphertext":     "<base64: AES-256-GCM 密文，末尾含 16-byte GCM tag>",
+  "nonce":          "<base64: 12-byte AES-GCM nonce>",
+  "hmac_signature": "<base64: HMAC-SHA256 簽名>"
+}
+```
+
+**HMAC 簽名對象**（必須與前端一致）：
+```
+base64(encrypted_key) + "." + base64(nonce) + "." + base64(ciphertext)
+```
 
 | 欄位 | Cloudflare 能看到？ |
 |------|:---:|

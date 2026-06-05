@@ -57,5 +57,6 @@
 
 ✅ QR Code 一次性驗證  ✅ JWT（90 天）  ✅ 審計日誌  ✅ SQLite 資料庫
 ✅ 強制認證中間件（所有路由）  ✅ QR Code URL 格式  ✅ 資料庫自動 Migration
-✅ L1/L2/L3 權限中間件  ✅ 手機端輪詢核准（HttpOnly Cookie）
-⏳ 端到端加密  ⏳ Token 計費  ⏳ 資源限制隊列
+✅ L1/L2/L3 權限中間件  ✅ 手機端輪詢核准（HttpOnly Cookie）  ✅ RSA E2E 密鑰對自動生成
+✅ 端到端加密（AES-256-GCM + RSA-OAEP + HMAC）  ✅ E2E 測試頁 /e2e-test
+⏳ Token 計費  ⏳ 資源限制隊列

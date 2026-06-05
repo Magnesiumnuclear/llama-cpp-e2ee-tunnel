@@ -241,12 +241,13 @@ class ControlPanel(QMainWindow):
         top.addStretch(1)
         v.addLayout(top)
 
-        cols = ["帳號", "裝置", "權限", "狀態", "審核結果", "建立時間", "核准時間"]
+        cols = ["帳號", "裝置", "權限", "狀態", "審核結果", "建立時間", "核准時間", "操作"]
         self.accounts_table = QTableWidget(0, len(cols))
         self.accounts_table.setHorizontalHeaderLabels(cols)
         hh = self.accounts_table.horizontalHeader()
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        hh.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
         v.addWidget(self.accounts_table)
         return w
 
@@ -451,10 +452,40 @@ class ControlPanel(QMainWindow):
                 it = self._ro(val)
                 it.setBackground(QColor(bg))
                 t.setItem(r, c, it)
+            # 操作欄：對 active 帳號顯示 E2E 測試按鈕
+            if st == "active":
+                btn_e2e = QPushButton("🔐 E2E 測試")
+                btn_e2e.setToolTip(f"開啟 {acc.get('account_id','')} 的 E2E 加密測試頁")
+                btn_e2e.clicked.connect(
+                    lambda _=False, a=acc.get("account_id", ""): self.open_e2e_test(a)
+                )
+                t.setCellWidget(r, 7, btn_e2e)
         self.accounts_count.setText(
             f"共 {len(data)}　|　✅ 已通過 {counts['active']}　"
             f"⏳ 待審 {counts['pending_approval']}　"
             f"❌ 未通過 {counts['rejected']}　⛔ 停用 {counts['disabled']}")
+
+    # ── E2E 測試頁開啟 ─────────────────────────────────────────
+    def open_e2e_test(self, account_id):
+        """呼叫 /admin/account-secrets 取得 token+secret，並在瀏覽器開啟 /e2e-test"""
+        ok, resp = http_get(f"/admin/account-secrets?account_id={account_id}")
+        if not ok or resp.get("status") != "success":
+            self.warn(f"無法取得帳號憑證：{resp.get('error') or resp.get('message')}")
+            return
+        d = resp.get("data", {})
+        token  = d.get("session_token", "")
+        secret = d.get("device_secret", "")
+        if not token or not secret:
+            self.warn("伺服器未回傳 session_token 或 device_secret，無法開啟測試頁。")
+            return
+        import urllib.parse
+        url = (
+            f"{PROXY_BASE}/e2e-test"
+            f"?token={urllib.parse.quote(token, safe='')}"
+            f"&secret={urllib.parse.quote(secret, safe='')}"
+        )
+        self.log_line(f"🔐 E2E 測試頁：{account_id}")
+        QDesktopServices.openUrl(QUrl(url))
 
     # ── 小工具 ─────────────────────────────────────────────────
     @staticmethod

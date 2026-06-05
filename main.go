@@ -351,15 +351,98 @@ func healthHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // 設備註冊（手機掃 QR Code 後調用）
+// GET /auth/register?temp_key=xxx&account_id=xxx → 返回 HTML 頁面，頁面自動完成 POST 流程
 func registerDeviceHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		tempKey := r.URL.Query().Get("temp_key")
+		accountID := r.URL.Query().Get("account_id")
+		if tempKey == "" || accountID == "" {
+			http.Error(w, "缺少 temp_key 或 account_id 參數", http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, `<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>llama-proxy 設備認證</title>
+<style>
+  body { margin: 0; background: #1a1a2e; color: #e0e0e0; font-family: sans-serif;
+         display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .card { background: #16213e; border-radius: 12px; padding: 2rem 2.5rem; max-width: 360px;
+          width: 90%%; text-align: center; box-shadow: 0 4px 24px rgba(0,0,0,0.4); }
+  h2 { margin: 0 0 1.5rem; font-size: 1.2rem; color: #a0c4ff; }
+  #status { font-size: 1rem; line-height: 1.7; }
+  .ok  { color: #69f0ae; }
+  .err { color: #ff5252; }
+  .dim { color: #888; font-size: 0.85rem; margin-top: 1rem; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h2>llama-proxy 設備認證</h2>
+  <div id="status">正在驗證 QR Code...</div>
+  <div class="dim" id="hint"></div>
+</div>
+<script>
+(async () => {
+  const set = (msg, cls) => {
+    document.getElementById('status').innerHTML = msg;
+    if (cls) document.getElementById('status').className = cls;
+  };
+  const hint = (msg) => document.getElementById('hint').textContent = msg;
+
+  const tempKey   = %q;
+  const accountId = %q;
+  const deviceId  = 'web-' + (navigator.userAgent.replace(/\s+/g,'').slice(-12) || Math.random().toString(36).slice(2));
+
+  try {
+    const res = await fetch('/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ temp_key: tempKey, account_id: accountId, device_id: deviceId })
+    });
+    const data = await res.json();
+
+    if (res.ok && data.status === 'success') {
+      set('✅ 設備已連接！<br>等待電腦端核准...', 'ok');
+      hint('核准後即可使用 llama.cpp');
+      if (data.data && data.data.session_token) {
+        localStorage.setItem('session_token', data.data.session_token);
+        set('✅ 連接成功！正在跳轉...', 'ok');
+        hint('3 秒後自動跳轉到 llama.cpp');
+        setTimeout(() => { window.location.href = '/'; }, 3000);
+      }
+    } else {
+      const errMap = {
+        'temp_key 和 device_id 為必填': '參數缺失，請重新掃描 QR Code',
+        '無效的 temp_key': '❌ QR Code 無效，請重新生成',
+        '此 QR Code 已被使用，請重新生成': '❌ QR Code 已被使用<br>請在電腦端重新生成',
+        '此 QR Code 已過期，請重新生成': '❌ QR Code 已過期（超過 1 小時）<br>請在電腦端重新生成',
+      };
+      set(errMap[data.error] || ('❌ 錯誤：' + (data.error || data.message || '未知錯誤')), 'err');
+    }
+  } catch (e) {
+    set('❌ 網路錯誤，請確認代理層正在運行', 'err');
+    hint(e.toString());
+  }
+})();
+</script>
+</body>
+</html>`, tempKey, accountID)
+		return
+	}
+
 	if r.Method != http.MethodPost {
-		sendJSON(w, http.StatusMethodNotAllowed, APIResponse{Status: "error", Error: "只接受 POST"})
+		sendJSON(w, http.StatusMethodNotAllowed, APIResponse{Status: "error", Error: "只接受 GET 或 POST"})
 		return
 	}
 
 	var req struct {
-		TempKey  string `json:"temp_key"`
-		DeviceID string `json:"device_id"`
+		TempKey   string `json:"temp_key"`
+		DeviceID  string `json:"device_id"`
+		AccountID string `json:"account_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "無效的請求格式"})

@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -407,13 +408,30 @@ func registerDeviceHandler(w http.ResponseWriter, r *http.Request) {
 
     if (res.ok && data.status === 'success') {
       set('✅ 設備已連接！<br>等待電腦端核准...', 'ok');
-      hint('核准後即可使用 llama.cpp');
-      if (data.data && data.data.session_token) {
-        localStorage.setItem('session_token', data.data.session_token);
-        set('✅ 連接成功！正在跳轉...', 'ok');
-        hint('3 秒後自動跳轉到 llama.cpp');
-        setTimeout(() => { window.location.href = '/'; }, 3000);
+      hint('核准後將自動進入 llama.cpp');
+      const deviceSecret = data.data && data.data.device_secret;
+      if (!deviceSecret) {
+        set('❌ 伺服器未回傳 device_secret，無法繼續', 'err');
+        return;
       }
+      const poll = async () => {
+        try {
+          const pr = await fetch('/auth/poll?account_id=' + encodeURIComponent(accountId) + '&device_secret=' + encodeURIComponent(deviceSecret));
+          const pd = await pr.json();
+          const st = pd.data && pd.data.status;
+          if (st === 'approved') {
+            set('✅ 核准成功！正在進入...', 'ok');
+            hint('');
+            setTimeout(() => { window.location.href = '/'; }, 800);
+            return;
+          } else if (st === 'rejected' || st === 'disabled') {
+            set('❌ 此設備已被' + (st === 'rejected' ? '拒絕' : '停用'), 'err');
+            return;
+          }
+        } catch (e) {}
+        setTimeout(poll, 2500);
+      };
+      setTimeout(poll, 2500);
     } else {
       const errMap = {
         'temp_key 和 device_id 為必填': '參數缺失，請重新掃描 QR Code',
@@ -506,9 +524,73 @@ func registerDeviceHandler(w http.ResponseWriter, r *http.Request) {
 		Status:  "success",
 		Message: "設備已註冊，等待電腦端核准",
 		Data: map[string]string{
-			"account_id": accountID,
-			"status":     "pending_approval",
+			"account_id":    accountID,
+			"status":        "pending_approval",
+			"device_secret": deviceSecret,
 		},
+	})
+}
+
+// 手機端輪詢審批狀態（公開端點，用 device_secret 授權，免認證）
+// GET /auth/poll?account_id=xxx&device_secret=xxx
+//   pending_approval → {status:"pending..."}；rejected/disabled → {status:<status>}
+//   active → Set-Cookie(session_token, HttpOnly) + {status:"approved"}
+func pollStatusHandler(w http.ResponseWriter, r *http.Request) {
+	accountID := r.URL.Query().Get("account_id")
+	deviceSecret := r.URL.Query().Get("device_secret")
+	if accountID == "" || deviceSecret == "" {
+		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "缺少 account_id 或 device_secret"})
+		return
+	}
+
+	var storedSecret, status, deviceID string
+	err := db.QueryRow(
+		"SELECT device_secret, status, device_id FROM accounts WHERE account_id = ?",
+		accountID,
+	).Scan(&storedSecret, &status, &deviceID)
+	if err != nil {
+		sendJSON(w, http.StatusNotFound, APIResponse{Status: "error", Error: "找不到此帳號"})
+		return
+	}
+
+	// 用 constant-time 比較驗證 device_secret，避免時序攻擊
+	if subtle.ConstantTimeCompare([]byte(storedSecret), []byte(deviceSecret)) != 1 {
+		sendJSON(w, http.StatusForbidden, APIResponse{Status: "error", Error: "device_secret 不符"})
+		logAudit(accountID, "poll_status", "account", r.RemoteAddr, deviceID, "denied", "bad_device_secret")
+		return
+	}
+
+	if status != "active" {
+		// pending_approval / rejected / disabled：原樣回報，手機端據此顯示
+		sendJSON(w, http.StatusOK, APIResponse{Status: "success", Data: map[string]string{"status": status}})
+		return
+	}
+
+	// 已核准：撈最新 session_token，種成 HttpOnly cookie
+	var token string
+	err = db.QueryRow(
+		"SELECT session_token FROM sessions WHERE account_id = ? AND device_id = ? ORDER BY created_at DESC LIMIT 1",
+		accountID, deviceID,
+	).Scan(&token)
+	if err != nil {
+		sendJSON(w, http.StatusInternalServerError, APIResponse{Status: "error", Error: "帳號已核准但找不到 session"})
+		return
+	}
+	setSessionCookie(w, r, token)
+	logAudit(accountID, "poll_status", "account", r.RemoteAddr, deviceID, "success", "approved")
+	sendJSON(w, http.StatusOK, APIResponse{Status: "success", Data: map[string]string{"status": "approved"}})
+}
+
+// 種 session_token cookie：HttpOnly 防 XSS 竊取；經 HTTPS 隧道時（X-Forwarded-Proto=https）才加 Secure
+func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "session_token",
+		Value:    token,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.Header.Get("X-Forwarded-Proto") == "https",
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   90 * 24 * 60 * 60, // 90 天，與 JWT 有效期一致
 	})
 }
 
@@ -951,6 +1033,7 @@ func main() {
 	// 公開端點（無需認證）
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/auth/register", registerDeviceHandler)
+	http.HandleFunc("/auth/poll", pollStatusHandler)
 
 	// 管理端點（電腦端調用，生產環境應限制 IP）
 	http.HandleFunc("/admin/generate-qr", generateQRHandler)

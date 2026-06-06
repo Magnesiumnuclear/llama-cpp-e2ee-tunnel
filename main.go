@@ -972,6 +972,36 @@ func listAccountsHandler(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, http.StatusOK, APIResponse{Status: "success", Data: accounts})
 }
 
+// 刪除帳號（管理端點）
+func deleteAccountHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		sendJSON(w, http.StatusMethodNotAllowed, APIResponse{Status: "error", Error: "只接受 POST"})
+		return
+	}
+	var req struct {
+		AccountID string `json:"account_id"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.AccountID == "" {
+		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "account_id 為必填"})
+		return
+	}
+	// 確認帳號存在
+	var exists int
+	err := db.QueryRow("SELECT COUNT(*) FROM accounts WHERE account_id = ?", req.AccountID).Scan(&exists)
+	if err != nil || exists == 0 {
+		sendJSON(w, http.StatusNotFound, APIResponse{Status: "error", Error: "找不到此帳號"})
+		return
+	}
+	// 刪除相關 sessions
+	db.Exec("DELETE FROM sessions WHERE account_id = ?", req.AccountID)
+	// 刪除帳號
+	db.Exec("DELETE FROM accounts WHERE account_id = ?", req.AccountID)
+	log.Printf("🗑 帳號已刪除: %s\n", req.AccountID)
+	logAudit("admin", "delete_account", req.AccountID, r.RemoteAddr, "", "success", "")
+	sendJSON(w, http.StatusOK, APIResponse{Status: "success", Message: fmt.Sprintf("帳號 %s 已刪除", req.AccountID)})
+}
+
 // 驗證 Token（手機端可用此端點確認 token 是否有效）
 func verifyTokenHandler(w http.ResponseWriter, r *http.Request) {
 	accountID := r.Header.Get("X-Account-ID")
@@ -1459,6 +1489,7 @@ func main() {
 	http.HandleFunc("/admin/accounts", listAccountsHandler)
 	http.HandleFunc("/admin/logs", viewLogsHandler)
 	http.HandleFunc("/admin/account-secrets", accountSecretsHandler) // 供控制面板取得 token+secret 開啟 E2E 測試頁
+	http.HandleFunc("/admin/delete-account", deleteAccountHandler)   // 刪除帳號
 
 	// 需認證的端點
 	http.HandleFunc("/auth/verify", authMiddleware(verifyTokenHandler, "L1"))

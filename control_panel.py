@@ -20,7 +20,7 @@ import urllib.request
 import urllib.error
 
 from PyQt6.QtCore import Qt, QProcess, QProcessEnvironment, QTimer, QUrl
-from PyQt6.QtGui import QPixmap, QColor, QDesktopServices, QFont
+from PyQt6.QtGui import QPixmap, QDesktopServices, QFont
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton, QLineEdit,
     QPlainTextEdit, QVBoxLayout, QHBoxLayout, QGroupBox, QTabWidget,
@@ -248,6 +248,7 @@ class ControlPanel(QMainWindow):
         hh.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         hh.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)
+        self.accounts_table.setAlternatingRowColors(True)
         v.addWidget(self.accounts_table)
         return w
 
@@ -440,7 +441,7 @@ class ControlPanel(QMainWindow):
         t.setRowCount(0)
         for acc in data:
             st = acc.get("status", "")
-            view, bg = STATUS_VIEW.get(st, (st or "—", "#eceff1"))
+            view, _ = STATUS_VIEW.get(st, (st or "—", ""))
             if st in counts:
                 counts[st] += 1
             r = t.rowCount()
@@ -449,21 +450,45 @@ class ControlPanel(QMainWindow):
                     acc.get("permission", ""), st, view,
                     acc.get("created_at", ""), acc.get("approved_at", "")]
             for c, val in enumerate(vals):
-                it = self._ro(val)
-                it.setBackground(QColor(bg))
-                t.setItem(r, c, it)
-            # 操作欄：對 active 帳號顯示 E2E 測試按鈕
+                t.setItem(r, c, self._ro(val))
+            # 操作欄：按鈕組合
+            op_widget = QWidget()
+            op_layout = QHBoxLayout(op_widget)
+            op_layout.setContentsMargins(2, 1, 2, 1)
+            op_layout.setSpacing(4)
             if st == "active":
-                btn_e2e = QPushButton("🔐 E2E 測試")
+                btn_e2e = QPushButton("🔐 E2E")
                 btn_e2e.setToolTip(f"開啟 {acc.get('account_id','')} 的 E2E 加密測試頁")
                 btn_e2e.clicked.connect(
                     lambda _=False, a=acc.get("account_id", ""): self.open_e2e_test(a)
                 )
-                t.setCellWidget(r, 7, btn_e2e)
+                op_layout.addWidget(btn_e2e)
+            btn_del = QPushButton("🗑 刪除")
+            btn_del.setToolTip(f"刪除帳號 {acc.get('account_id','')}")
+            btn_del.setStyleSheet("color: #c62828;")
+            btn_del.clicked.connect(
+                lambda _=False, a=acc.get("account_id", ""): self.do_delete_account(a)
+            )
+            op_layout.addWidget(btn_del)
+            t.setCellWidget(r, 7, op_widget)
         self.accounts_count.setText(
             f"共 {len(data)}　|　✅ 已通過 {counts['active']}　"
             f"⏳ 待審 {counts['pending_approval']}　"
             f"❌ 未通過 {counts['rejected']}　⛔ 停用 {counts['disabled']}")
+
+    # ── 刪除帳號 ──────────────────────────────────────────────
+    def do_delete_account(self, account_id):
+        if QMessageBox.question(
+            self, "確認刪除",
+            f"確定刪除帳號「{account_id}」？\n此操作將同時移除所有 session，無法還原。"
+        ) != QMessageBox.StandardButton.Yes:
+            return
+        ok, resp = http_post("/admin/delete-account", {"account_id": account_id})
+        if ok and resp.get("status") == "success":
+            self.log_line(f"🗑 帳號已刪除：{account_id}")
+            self.refresh_accounts()
+        else:
+            self.warn(f"刪除失敗：{resp.get('error') or resp.get('message')}")
 
     # ── E2E 測試頁開啟 ─────────────────────────────────────────
     def open_e2e_test(self, account_id):

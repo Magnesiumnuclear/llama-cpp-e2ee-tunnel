@@ -1277,10 +1277,70 @@ func proxyToLlamaPublic(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
-// e2eChatHandler：E2E 聊天端點。
-// P2 為純明文串流轉發（驗證自訂串流管線）；P3 將在「讀 body 後」插入 E2E 解密、
-// 在「寫出前」插入逐塊 AES-GCM 加密，前端 ChatService 對應加解密。
-// 流程：讀請求 body → 轉發 llama.cpp /v1/chat/completions（串流）→ 逐塊 flush 回客戶端。
+// e2eChatEnvelope：forked UI 送來的 E2E 聊天請求信封。
+// 無 HMAC —— 認證靠 HttpOnly cookie（authMiddleware 先驗），完整性靠 AES-GCM tag。
+// 解密後的明文為 OpenAI /v1/chat/completions 的請求 JSON。
+type e2eChatEnvelope struct {
+	EncryptedKey string `json:"encrypted_key"` // base64: RSA-OAEP(伺服器公鑰, K)
+	IV           string `json:"iv"`            // base64: 12-byte AES-GCM nonce
+	Ciphertext   string `json:"ciphertext"`    // base64: AES-256-GCM(K, iv, 明文) 末尾含 16-byte tag
+}
+
+// decryptE2EChat 解密聊天信封，回傳明文與本次的一次性 AES-256 金鑰 K（供回應串流加密重用）。
+func decryptE2EChat(env e2eChatEnvelope) (plaintext, key []byte, err error) {
+	encKey, err := base64.StdEncoding.DecodeString(env.EncryptedKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encrypted_key base64: %w", err)
+	}
+	iv, err := base64.StdEncoding.DecodeString(env.IV)
+	if err != nil {
+		return nil, nil, fmt.Errorf("iv base64: %w", err)
+	}
+	ct, err := base64.StdEncoding.DecodeString(env.Ciphertext)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ciphertext base64: %w", err)
+	}
+	if serverE2EPrivKey == nil {
+		return nil, nil, fmt.Errorf("E2E 私鑰尚未初始化")
+	}
+	key, err = rsa.DecryptOAEP(sha256.New(), rand.Reader, serverE2EPrivKey, encKey, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("RSA-OAEP 解密 K 失敗: %w", err)
+	}
+	if len(key) != 32 {
+		return nil, nil, fmt.Errorf("K 長度無效（應 32 bytes，實際 %d）", len(key))
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, nil, fmt.Errorf("AES cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, nil, fmt.Errorf("AES-GCM: %w", err)
+	}
+	if len(iv) != gcm.NonceSize() {
+		return nil, nil, fmt.Errorf("iv 長度無效（應 %d，實際 %d）", gcm.NonceSize(), len(iv))
+	}
+	plaintext, err = gcm.Open(nil, iv, ct, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("AES-256-GCM 解密失敗: %w", err)
+	}
+	return plaintext, key, nil
+}
+
+// encE2EFrame 用 K（gcm）對一塊 bytes 做 AES-256-GCM 加密，回傳 "base64(iv).base64(ct+tag)"。
+func encE2EFrame(gcm cipher.AEAD, chunk []byte) (string, error) {
+	iv := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(iv); err != nil {
+		return "", err
+	}
+	ct := gcm.Seal(nil, iv, chunk, nil)
+	return base64.StdEncoding.EncodeToString(iv) + "." + base64.StdEncoding.EncodeToString(ct), nil
+}
+
+// e2eChatHandler：forked UI 的 E2E 聊天端點（P3）。
+// 解密請求信封 → 轉發 llama.cpp /v1/chat/completions（串流）→ 用同一把 K 逐塊 AES-GCM 加密成
+// SSE 幀「data: b64(iv).b64(ct)」串回前端。錯誤（解密失敗 / 上游非 200）以明文回傳（決策③）。
 func e2eChatHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		sendJSON(w, http.StatusMethodNotAllowed, APIResponse{Status: "error", Error: "只接受 POST"})
@@ -1293,9 +1353,26 @@ func e2eChatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// P2：body 即明文 OpenAI 請求，直接轉發。
-	// P3：此處改為先 E2E 解密 body → 取得明文 OpenAI 請求。
-	upstream, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:8080/v1/chat/completions", bytes.NewReader(body))
+	var env e2eChatEnvelope
+	if err := json.Unmarshal(body, &env); err != nil || env.EncryptedKey == "" || env.Ciphertext == "" || env.IV == "" {
+		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "無效的 E2E 信封"})
+		return
+	}
+
+	// E2E 解密：RSA 取出 K → AES-GCM 解密得明文 OpenAI 請求
+	plaintext, key, decErr := decryptE2EChat(env)
+	if decErr != nil {
+		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "E2E 解密失敗: " + decErr.Error()})
+		logAudit(r.Header.Get("X-Account-ID"), "e2e_chat", "llama", r.RemoteAddr, r.Header.Get("X-Device-ID"), "denied", decErr.Error())
+		return
+	}
+
+	// 用同一把 K 建立回應加密用的 GCM
+	block, _ := aes.NewCipher(key)
+	gcm, _ := cipher.NewGCM(block)
+
+	// 轉發明文請求到 llama.cpp（串流）
+	upstream, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:8080/v1/chat/completions", bytes.NewReader(plaintext))
 	if err != nil {
 		sendJSON(w, http.StatusInternalServerError, APIResponse{Status: "error", Error: "建立上游請求失敗"})
 		return
@@ -1310,22 +1387,31 @@ func e2eChatHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// 複製上游回應 header 與狀態碼（保留 text/event-stream 等）
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
+	// 決策③：上游非 200 → 明文回傳錯誤（前端 response.ok=false 走既有錯誤處理）
+	if resp.StatusCode != http.StatusOK {
+		if ct := resp.Header.Get("Content-Type"); ct != "" {
+			w.Header().Set("Content-Type", ct)
 		}
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
 	}
-	w.WriteHeader(resp.StatusCode)
 
-	// 串流轉送：逐塊讀取並 flush，確保 token 即時送達不被緩衝。
-	// P3：此處改為逐塊 AES-GCM 加密後再寫出。
+	// 成功：逐塊 AES-GCM 加密成 SSE 幀串回（明文只在本機記憶體短暫存在）
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
 	buf := make([]byte, 4096)
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
-			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+			frame, encErr := encE2EFrame(gcm, buf[:n])
+			if encErr != nil {
+				return
+			}
+			if _, werr := io.WriteString(w, "data: "+frame+"\n\n"); werr != nil {
 				return
 			}
 			if flusher != nil {
@@ -1336,8 +1422,7 @@ func e2eChatHandler(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-
-	logAudit(r.Header.Get("X-Account-ID"), "e2e_chat", "llama", r.RemoteAddr, r.Header.Get("X-Device-ID"), "success", "streamed")
+	logAudit(r.Header.Get("X-Account-ID"), "e2e_chat", "llama", r.RemoteAddr, r.Header.Get("X-Device-ID"), "success", "e2e_stream")
 }
 
 // webuiDistDir 是 forked llama-ui（SvelteKit）的建置產物目錄（index.html / bundle.js / bundle.css）

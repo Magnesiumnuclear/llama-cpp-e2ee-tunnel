@@ -1,4 +1,5 @@
 import { getJsonHeaders } from '$lib/utils/api-headers';
+import { e2eFetch } from './e2e-crypto';
 import { formatAttachmentText } from '$lib/utils/formatters';
 import { isAbortError } from '$lib/utils/abort';
 import {
@@ -311,12 +312,8 @@ export class ChatService {
 		}
 
 		try {
-			const response = await fetch(API_CHAT.COMPLETIONS, {
-				method: 'POST',
-				headers: getJsonHeaders(),
-				body: JSON.stringify(requestBody),
-				signal
-			});
+			// E2E fork：加密請求送出、回應串流解密（取代原本直接 fetch /api/e2e/chat）
+			const response = await e2eFetch(API_CHAT.COMPLETIONS, requestBody, signal);
 
 			if (!response.ok) {
 				const error = await ChatService.parseErrorResponse(response);
@@ -524,12 +521,8 @@ export class ChatService {
 		}
 
 		try {
-			await fetch(API_CHAT.COMPLETIONS, {
-				method: 'POST',
-				headers: getJsonHeaders(),
-				body: JSON.stringify(requestBody),
-				signal
-			});
+			// E2E fork：pre-encode 暖機請求也需加密（回應忽略）
+			await e2eFetch(API_CHAT.COMPLETIONS, requestBody, signal);
 		} catch (error) {
 			if (!isAbortError(error)) {
 				console.warn('[ChatService] Pre-encode request failed:', error);

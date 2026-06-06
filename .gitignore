@@ -24,6 +24,9 @@ qrcode_*.png
 *.so
 *.dylib
 
+# forked Web UI 編譯產物（npm run build 生成；提交源碼 webui/src，不提交建置輸出）
+webui/dist/
+
 # IDE
 .vscode/
 .idea/

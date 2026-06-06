@@ -55,6 +55,27 @@
 | 多設備 | 多個獨立 Session | 各設備獨立額度 |
 | 資源限制 | 優先級隊列 | 公平調度 |
 
+## forked Web UI 與 E2E 聊天中繼
+
+為了讓「聊天內容對 Cloudflare 也不可見」，原生 llama.cpp Web UI（第三方 bundle、串流回應）無法直接加密，因此改採 **fork 其 SvelteKit 源碼**（`webui/`，由 llama.cpp 的 `tools/ui` 複製而來），僅於網路層 `ChatService` 注入加解密、**不改聊天渲染與推理邏輯**。proxy 同時擔任「UI 主機」與「E2E 聊天閘道」，llama.cpp 退居純後端：
+
+```
+手機/瀏覽器 ──HTTPS隧道──→ 代理層 :8081
+  GET / /bundle.js …       → 本地服務 forked llama-ui（webui/dist，gzip 預壓）
+  POST /api/e2e/chat       → e2eChatHandler：串流中繼
+  GET /props /v1/models …  → 轉發 llama.cpp :8080
+```
+
+| 階段 | 內容 | 狀態 |
+|------|------|------|
+| P1 | proxy 服務 forked UI、其餘轉發 llama.cpp | ✅ |
+| P2 | 聊天改走 `/api/e2e/chat` 自訂串流（明文） | ✅ |
+| P3 | `/api/e2e/chat` 解密入/逐塊 AES-GCM 加密出 + 前端加解密 | ⏳ |
+| P4 | 文檔同步、gzip 等優化 | 進行中 |
+
+> 範圍：僅加密**聊天內容**（prompt + 回應）；metadata（`/props`、`/v1/models` …）維持明文。
+> 注意：舊端點 `/api/chat` 目前 E2E 解密成功但回傳模擬回應；實際聊天走 forked UI 的 `/api/e2e/chat`。
+
 ## 六張核心資料表
 
 ```

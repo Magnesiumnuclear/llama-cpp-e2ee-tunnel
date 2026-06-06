@@ -265,6 +265,19 @@ curl -H "Authorization: Bearer <token>" \
 
 ---
 
+### POST /api/e2e/chat — forked UI 的聊天串流端點（需 L2+）
+
+自架 forked llama-ui 的 `ChatService` 改打此端點（取代直接打 llama.cpp 原生的 `/v1/chat/completions`，見 [01-architecture.md](01-architecture.md)）。
+
+流程：proxy 讀請求 body → 轉發 llama.cpp `/v1/chat/completions`（串流）→ 逐塊 flush 回前端。
+
+- **P2（目前）**：明文串流轉發，驗證自訂串流管線。
+- **P3（規劃）**：proxy 在此「解密入、逐塊 AES-GCM 加密出」，前端對應加密送/解密收，使聊天內容對 Cloudflare 不可見。
+
+回應：`text/event-stream`（SSE，與 OpenAI `/v1/chat/completions` 格式相容，前端 SSE 解析不需改動）。
+
+---
+
 ### GET /api/conversations — 查看自己的對話記錄（需 L1+）
 
 ```bash
@@ -273,22 +286,20 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:8081/api/conversations
 
 ---
 
-### GET / 及 /api/llama/* — 代理到 llama.cpp Web UI（需 L1+）
+### GET / 及前端資源、其餘路徑 — Web UI 與 llama.cpp 代理（需 L1+）
 
 > ⚠️ **所有請求都需要認證**，包括 `GET /`。未攜帶 Token 將回傳 401。
 
-```bash
-curl -H "Authorization: Bearer <token>" http://127.0.0.1:8081/
-```
-
-攜帶有效 Token 時，請求被轉發到 `http://127.0.0.1:8080`。
+`/`、`/bundle.js`、`/bundle.css` 由 proxy **服務本地自架 forked llama-ui**（`webui/dist`，bundle 經 gzip 預壓），**不再轉發** llama.cpp 的原生 UI。其餘路徑（`/props`、`/v1/*`、`/slots`、`/models`、`/tools` …）才轉發到 `http://127.0.0.1:8080`。
 內部 Header（`X-Account-ID`、`X-Device-ID`、`X-Permission`、`Authorization`）不會被轉發給 llama.cpp。
 
 | 路由 | 最低權限 | 說明 |
 |------|---------|------|
-| `/` | L1 | llama.cpp Web UI 首頁 |
+| `/`、`/bundle.js`、`/bundle.css` | L1 | 服務 forked llama-ui（本地 `webui/dist`） |
+| `/api/e2e/chat` | L2 | forked UI 的聊天串流端點（轉發 llama.cpp） |
+| `/props`、`/v1/*`、`/slots` … | L1 | 轉發 llama.cpp（UI 的 metadata 與原生 API） |
 | `/api/llama/*` | L2 | llama.cpp API 端點 |
-| `/api/chat` | L2 | 代理層聊天（附審計） |
+| `/api/chat` | L2 | 代理層聊天（明文/E2E 解密；目前回模擬回應） |
 | `/api/conversations` | L1 | 對話歷史查詢 |
 | `/auth/verify` | L1 | Token 狀態確認 |
 

@@ -3,8 +3,17 @@
 ## 前置要求
 
 1. **Go 已安裝**：`go version` 能顯示版本
-2. **llama.cpp 正在運行**：`http://127.0.0.1:8080` 可訪問
-3. Windows PowerShell 或 CMD
+2. **Node.js 18+ 已安裝**：`node --version`（用於建置 forked Web UI）
+3. **llama.cpp 正在運行**：`http://127.0.0.1:8080` 可訪問
+4. Windows PowerShell 或 CMD
+
+> **建置 forked Web UI（首次必做）**：proxy 的 `/` 服務的是自架 forked llama-ui，需先建置出 `webui/dist`：
+> ```powershell
+> cd D:\software\llama\webui
+> npm install
+> npm run build      # 產出 webui/dist/{index.html,bundle.js,bundle.css}
+> ```
+> UI 源碼改動後需重新 `npm run build` 並**重啟 proxy**（bundle 於啟動時做 gzip 預壓）。
 
 ## 啟動步驟
 
@@ -51,6 +60,17 @@ llama.cpp 代理層啟動（階段 3：強制認證版）
 🚀 代理層監聽在 :8081
 ```
 
+## 推薦：用控制面板一鍵啟動
+
+`control_panel.py`（PyQt6）把上述步驟全自動化：啟動 Cloudflare Tunnel → 自動擷取公網 URL 填入 `LLAMA_PUBLIC_URL` → 帶該 URL 啟動 `go run main.go`，並提供 QR 生成、權限審核、帳號總覽。
+
+```powershell
+# 首次需安裝：.\.venv\Scripts\python.exe -m pip install PyQt6
+.\.venv\Scripts\python.exe control_panel.py
+```
+
+> 仍需先完成上方「建置 forked Web UI」。
+
 ## 完整測試流程（PowerShell）
 
 ```powershell
@@ -66,7 +86,7 @@ $reg = Invoke-RestMethod -Uri "http://127.0.0.1:8081/auth/register" -Method POST
 Write-Host "狀態: $($reg.data.status)"
 
 # 3. 電腦端核准
-$approveBody = @{ account_id="test_user"; permission_level="L2" } | ConvertTo-Json
+$approveBody = @{ account_id="test_user"; permission="L2"; action="approve" } | ConvertTo-Json
 $approved = Invoke-RestMethod -Uri "http://127.0.0.1:8081/admin/approve" -Method POST -ContentType "application/json" -Body $approveBody
 $token = $approved.data.session_token
 

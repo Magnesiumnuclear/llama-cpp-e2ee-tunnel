@@ -59,7 +59,8 @@
 | 端點 | 說明 |
 |------|------|
 | `GET /api/public-key` | 返回伺服器 RSA E2E 公鑰（SPKI PEM），公開無需認證 |
-| `POST /api/chat` | 同時支援明文請求與 E2E 加密請求，需 L2+ |
+| `POST /api/chat` | 同時支援明文請求與 E2E 加密請求（附 HMAC），需 L2+ |
+| `POST /api/e2e/chat` | forked UI 的 E2E 聊天串流（無 HMAC，AES-GCM 加密回應），需 L2+ |
 | `GET /e2e-test` | E2E 測試頁（開發用） |
 
 ### E2E Payload 格式
@@ -84,6 +85,34 @@ base64(encrypted_key) + "." + base64(nonce) + "." + base64(ciphertext)
 | ciphertext（訊息密文） | ✗ 完全密文 |
 | encrypted_key（RSA 加密的 dialogue_key） | ✗ 完全密文 |
 | nonce / timestamp | 可見（無意義） |
+
+## `/api/e2e/chat` 信封格式（forked UI 使用）
+
+與 `/api/chat` 的 E2E 格式不同，此端點使用更精簡的信封（認證靠 HttpOnly cookie，不需 HMAC）：
+
+### 請求信封（`e2eChatEnvelope`）
+
+```json
+{
+  "encrypted_key": "<base64: RSA-OAEP(伺服器公鑰, K)>",
+  "iv":            "<base64: 12-byte AES-GCM nonce>",
+  "ciphertext":    "<base64: AES-256-GCM(K, iv, OpenAI 請求 JSON)，末尾含 GCM tag>"
+}
+```
+
+| 欄位對比 | `/api/chat` | `/api/e2e/chat` |
+|---------|:-----------:|:---------------:|
+| nonce 欄位名 | `nonce` | `iv` |
+| HMAC 驗證 | ✓ `hmac_signature` | ✗（靠 AES-GCM tag） |
+| 認證方式 | Bearer Token | HttpOnly Cookie |
+
+### 回應格式（加密 SSE 串流）
+
+Proxy 用同一把 K 對 llama.cpp 串流回應逐塊加密，每個 SSE 幀格式：
+```
+data: <base64(iv)>.<base64(ciphertext+tag)>\n\n
+```
+前端解密：從 `data:` 取出字串 → 以 `.` 分割 → base64 解碼 iv 與 ct → AES-GCM 解密 → 得原始 OpenAI SSE 片段。
 
 ## IndexedDB 密鑰存儲結構（手機端）
 

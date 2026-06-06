@@ -198,6 +198,26 @@ curl http://127.0.0.1:8081/admin/logs?limit=100
 curl "http://127.0.0.1:8081/admin/account-secrets?account_id=user_001"
 ```
 
+---
+
+### POST /admin/delete-account — 刪除帳號
+
+刪除指定帳號及其所有 Sessions。
+
+```bash
+POST /admin/delete-account
+Content-Type: application/json
+
+{ "account_id": "user_001" }
+```
+
+回應：
+```json
+{ "status": "success", "message": "帳號 user_001 已刪除" }
+```
+
+錯誤碼：`400` 缺少 account_id | `404` 帳號不存在
+
 回應（成功）：
 ```json
 {
@@ -265,16 +285,28 @@ curl -H "Authorization: Bearer <token>" \
 
 ---
 
-### POST /api/e2e/chat — forked UI 的聊天串流端點（需 L2+）
+### POST /api/e2e/chat — forked UI 的 E2E 聊天串流端點（需 L2+）
 
-自架 forked llama-ui 的 `ChatService` 改打此端點（取代直接打 llama.cpp 原生的 `/v1/chat/completions`，見 [01-architecture.md](01-architecture.md)）。
+自架 forked llama-ui 的 `ChatService` 改打此端點（取代直接打 llama.cpp 原生的 `/v1/chat/completions`，見 [01-architecture.md](01-architecture.md)）。**P3 已實作**：proxy 解密 E2E 信封 → 轉發 llama.cpp → 逐塊 AES-GCM 加密回應串流。
 
-流程：proxy 讀請求 body → 轉發 llama.cpp `/v1/chat/completions`（串流）→ 逐塊 flush 回前端。
+**請求格式（E2E 信封）：**
+```json
+{
+  "encrypted_key": "<base64: RSA-OAEP 加密的一次性 AES-256 key K>",
+  "iv":            "<base64: 12-byte AES-GCM nonce>",
+  "ciphertext":    "<base64: AES-256-GCM(K, iv, OpenAI 請求 JSON)，末尾含 16-byte GCM tag>"
+}
+```
+> 注意：此格式使用 `iv` 欄位（非 `nonce`），且**無** `hmac_signature`（認證靠 HttpOnly cookie，完整性靠 AES-GCM tag）。
 
-- **P2（目前）**：明文串流轉發，驗證自訂串流管線。
-- **P3（規劃）**：proxy 在此「解密入、逐塊 AES-GCM 加密出」，前端對應加密送/解密收，使聊天內容對 Cloudflare 不可見。
+**回應格式：** `text/event-stream`，每個 SSE 幀為加密後的 llama.cpp 串流片段：
+```
+data: <base64(iv)>.<base64(ciphertext+tag)>
 
-回應：`text/event-stream`（SSE，與 OpenAI `/v1/chat/completions` 格式相容，前端 SSE 解析不需改動）。
+```
+前端收到每幀後用同一把 K 做 AES-GCM 解密，得到原始 OpenAI `/v1/chat/completions` SSE 內容。
+
+→ 信封格式與密鑰說明見 [04-encryption.md](04-encryption.md)
 
 ---
 

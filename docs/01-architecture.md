@@ -70,8 +70,8 @@
 |------|------|------|
 | P1 | proxy 服務 forked UI、其餘轉發 llama.cpp | ✅ |
 | P2 | 聊天改走 `/api/e2e/chat` 自訂串流（明文） | ✅ |
-| P3 | `/api/e2e/chat` 解密入/逐塊 AES-GCM 加密出 + 前端加解密 | ⏳ |
-| P4 | 文檔同步、gzip 等優化 | 進行中 |
+| P3 | `/api/e2e/chat` 解密入/逐塊 AES-GCM 加密出 + 前端加解密 | ✅ |
+| P4 | 文檔同步、gzip 等優化 | ✅ |
 
 > 範圍：僅加密**聊天內容**（prompt + 回應）；metadata（`/props`、`/v1/models` …）維持明文。
 > 注意：舊端點 `/api/chat` 目前 E2E 解密成功但回傳模擬回應；實際聊天走 forked UI 的 `/api/e2e/chat`。

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -1245,6 +1247,137 @@ func proxyToLlamaPublic(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
+// e2eChatHandler：E2E 聊天端點。
+// P2 為純明文串流轉發（驗證自訂串流管線）；P3 將在「讀 body 後」插入 E2E 解密、
+// 在「寫出前」插入逐塊 AES-GCM 加密，前端 ChatService 對應加解密。
+// 流程：讀請求 body → 轉發 llama.cpp /v1/chat/completions（串流）→ 逐塊 flush 回客戶端。
+func e2eChatHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		sendJSON(w, http.StatusMethodNotAllowed, APIResponse{Status: "error", Error: "只接受 POST"})
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "讀取請求體失敗"})
+		return
+	}
+
+	// P2：body 即明文 OpenAI 請求，直接轉發。
+	// P3：此處改為先 E2E 解密 body → 取得明文 OpenAI 請求。
+	upstream, err := http.NewRequest(http.MethodPost, "http://127.0.0.1:8080/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		sendJSON(w, http.StatusInternalServerError, APIResponse{Status: "error", Error: "建立上游請求失敗"})
+		return
+	}
+	upstream.Header.Set("Content-Type", "application/json")
+	upstream.Header.Set("Accept", "text/event-stream")
+
+	resp, err := http.DefaultClient.Do(upstream)
+	if err != nil {
+		sendJSON(w, http.StatusBadGateway, APIResponse{Status: "error", Error: "無法連接 llama.cpp: " + err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	// 複製上游回應 header 與狀態碼（保留 text/event-stream 等）
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	// 串流轉送：逐塊讀取並 flush，確保 token 即時送達不被緩衝。
+	// P3：此處改為逐塊 AES-GCM 加密後再寫出。
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 4096)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if readErr != nil {
+			break
+		}
+	}
+
+	logAudit(r.Header.Get("X-Account-ID"), "e2e_chat", "llama", r.RemoteAddr, r.Header.Get("X-Device-ID"), "success", "streamed")
+}
+
+// webuiDistDir 是 forked llama-ui（SvelteKit）的建置產物目錄（index.html / bundle.js / bundle.css）
+const webuiDistDir = "./webui/dist"
+
+// 啟動時預先 gzip 前端大檔（bundle.js ~8MB / bundle.css）並快取於記憶體，
+// 服務時依 Accept-Encoding 回壓縮版，大幅改善（尤其手機走隧道）首次載入。
+type gzAsset struct {
+	data    []byte
+	modTime time.Time
+}
+
+var (
+	gzBundleJS  gzAsset
+	gzBundleCSS gzAsset
+)
+
+func gzipFileToMem(path string) gzAsset {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("⚠️  gzip 預壓失敗，無法讀取 %s: %v", path, err)
+		return gzAsset{}
+	}
+	var buf bytes.Buffer
+	gw, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	gw.Write(raw)
+	gw.Close()
+	modTime := time.Now()
+	if fi, statErr := os.Stat(path); statErr == nil {
+		modTime = fi.ModTime()
+	}
+	log.Printf("✓ gzip 預壓 %s：%d → %d bytes", path, len(raw), buf.Len())
+	return gzAsset{data: buf.Bytes(), modTime: modTime}
+}
+
+// initWebuiAssets 啟動時呼叫，預壓前端大檔。
+func initWebuiAssets() {
+	gzBundleJS = gzipFileToMem(webuiDistDir + "/bundle.js")
+	gzBundleCSS = gzipFileToMem(webuiDistDir + "/bundle.css")
+}
+
+// serveAsset：客戶端支援 gzip 且已預壓則回壓縮版，否則回原始檔。
+// 用 ServeContent + modTime 處理 If-Modified-Since：UI 重建後自動失效、未變回 304，
+// 避免開發期 bundle.js 被瀏覽器長期快取而測到舊版。
+func serveAsset(w http.ResponseWriter, r *http.Request, path, contentType string, a gzAsset) {
+	if a.data != nil && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Content-Encoding", "gzip")
+		http.ServeContent(w, r, "", a.modTime, bytes.NewReader(a.data))
+		return
+	}
+	http.ServeFile(w, r, path)
+}
+
+// uiOrProxyHandler：根路徑與前端資源由本地 forked UI 服務，其餘（/v1/* /props /slots /models ...）轉發 llama.cpp。
+func uiOrProxyHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.URL.Path {
+	case "/":
+		http.ServeFile(w, r, webuiDistDir+"/index.html")
+		return
+	case "/bundle.js":
+		serveAsset(w, r, webuiDistDir+"/bundle.js", "text/javascript; charset=utf-8", gzBundleJS)
+		return
+	case "/bundle.css":
+		serveAsset(w, r, webuiDistDir+"/bundle.css", "text/css; charset=utf-8", gzBundleCSS)
+		return
+	}
+	proxyToLlamaAuthenticated(w, r)
+}
+
 // ============================================================
 // 中間件
 // ============================================================
@@ -1303,6 +1436,9 @@ func main() {
 		log.Fatalf("E2E 密鑰初始化失敗: %v\n", err)
 	}
 
+	// 預壓前端大檔（gzip），改善 bundle.js 載入速度
+	initWebuiAssets()
+
 	// ==================
 	// 路由設定
 	// ==================
@@ -1327,11 +1463,12 @@ func main() {
 	// 需認證的端點
 	http.HandleFunc("/auth/verify", authMiddleware(verifyTokenHandler, "L1"))
 	http.HandleFunc("/api/chat", authMiddleware(chatHandler, "L2"))
+	http.HandleFunc("/api/e2e/chat", authMiddleware(e2eChatHandler, "L2"))
 	http.HandleFunc("/api/conversations", authMiddleware(myConversationsHandler, "L1"))
 	http.HandleFunc("/api/llama/", authMiddleware(proxyToLlamaAuthenticated, "L2"))
 
-	// 所有其他請求（強制認證後轉發到 llama.cpp Web UI）
-	http.HandleFunc("/", authMiddleware(proxyToLlamaAuthenticated, "L1"))
+	// 根路徑與前端資源服務 forked UI；其餘請求轉發 llama.cpp（皆需認證）
+	http.HandleFunc("/", authMiddleware(uiOrProxyHandler, "L1"))
 
 	// 啟動
 	port := ":8081"

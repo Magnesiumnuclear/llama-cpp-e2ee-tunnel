@@ -32,6 +32,10 @@
 	import { isMobile } from '$lib/stores/viewport.svelte';
 
 	let { children } = $props();
+
+	// E2E fork marker: print on every load so it's obvious the modified UI is running (not the stock UI)
+	if (browser) console.log('llama-ui E2E fork (P2)');
+
 	let alwaysShowSidebarOnDesktop = $derived(config().alwaysShowSidebarOnDesktop);
 	let isDesktop = $derived(!isMobile.current);
 	let sidebarOpen = $state(false);

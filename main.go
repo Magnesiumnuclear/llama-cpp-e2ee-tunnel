@@ -1338,6 +1338,108 @@ func encE2EFrame(gcm cipher.AEAD, chunk []byte) (string, error) {
 	return base64.StdEncoding.EncodeToString(iv) + "." + base64.StdEncoding.EncodeToString(ct), nil
 }
 
+// ============================================================
+// /api/e2e/chat 濫用防禦：併發上限 + 速率限制 + 重放快取
+// 皆以記憶體儲存（單機單實例足夠；proxy 重啟即清空）。
+// ============================================================
+
+const (
+	e2eMaxConcurrentPerAccount = 1                // 每帳號同時最多幾個推論（保護 GPU）
+	e2eRateLimitMax            = 15               // 速率限制：每視窗最多請求數
+	e2eRateLimitWindow         = 60 * time.Second // 速率限制視窗
+	e2eReplayTTL               = 10 * time.Minute // iv 重放快取保留時間
+)
+
+var (
+	e2eMu       sync.Mutex
+	e2eInFlight = make(map[string]int)         // account_id → 進行中推論數
+	e2eReqTimes = make(map[string][]time.Time) // account_id → 視窗內請求時間
+	e2eSeenIV   = make(map[string]time.Time)   // iv(base64) → 首次見到時間
+)
+
+// e2eRateLimited 滑動視窗速率限制；未超量時記錄本次請求。回 true 表示超量。
+func e2eRateLimited(accountID string) bool {
+	e2eMu.Lock()
+	defer e2eMu.Unlock()
+	now := time.Now()
+	cutoff := now.Add(-e2eRateLimitWindow)
+	var kept []time.Time
+	for _, t := range e2eReqTimes[accountID] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= e2eRateLimitMax {
+		e2eReqTimes[accountID] = kept
+		return true
+	}
+	e2eReqTimes[accountID] = append(kept, now)
+	return false
+}
+
+// e2eCheckReplay 原子檢查並記錄 iv。回 true 表示近期已見過（重放）。
+func e2eCheckReplay(iv string) bool {
+	e2eMu.Lock()
+	defer e2eMu.Unlock()
+	if t, ok := e2eSeenIV[iv]; ok && time.Since(t) < e2eReplayTTL {
+		return true
+	}
+	e2eSeenIV[iv] = time.Now()
+	return false
+}
+
+// e2eAcquireSlot 嘗試取得帳號的推論名額。回 false 表示已達併發上限。
+func e2eAcquireSlot(accountID string) bool {
+	e2eMu.Lock()
+	defer e2eMu.Unlock()
+	if e2eInFlight[accountID] >= e2eMaxConcurrentPerAccount {
+		return false
+	}
+	e2eInFlight[accountID]++
+	return true
+}
+
+// e2eReleaseSlot 釋放帳號的推論名額。
+func e2eReleaseSlot(accountID string) {
+	e2eMu.Lock()
+	defer e2eMu.Unlock()
+	if e2eInFlight[accountID] > 0 {
+		e2eInFlight[accountID]--
+		if e2eInFlight[accountID] == 0 {
+			delete(e2eInFlight, accountID)
+		}
+	}
+}
+
+// e2eCleanupLoop 定期清理過期的重放 iv 與速率視窗紀錄，避免記憶體無限成長。
+func e2eCleanupLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	for range ticker.C {
+		e2eMu.Lock()
+		now := time.Now()
+		for iv, t := range e2eSeenIV {
+			if now.Sub(t) >= e2eReplayTTL {
+				delete(e2eSeenIV, iv)
+			}
+		}
+		cutoff := now.Add(-e2eRateLimitWindow)
+		for acc, times := range e2eReqTimes {
+			var kept []time.Time
+			for _, t := range times {
+				if t.After(cutoff) {
+					kept = append(kept, t)
+				}
+			}
+			if len(kept) == 0 {
+				delete(e2eReqTimes, acc)
+			} else {
+				e2eReqTimes[acc] = kept
+			}
+		}
+		e2eMu.Unlock()
+	}
+}
+
 // e2eChatHandler：forked UI 的 E2E 聊天端點（P3）。
 // 解密請求信封 → 轉發 llama.cpp /v1/chat/completions（串流）→ 用同一把 K 逐塊 AES-GCM 加密成
 // SSE 幀「data: b64(iv).b64(ct)」串回前端。錯誤（解密失敗 / 上游非 200）以明文回傳（決策③）。
@@ -1359,12 +1461,44 @@ func e2eChatHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	accountID := r.Header.Get("X-Account-ID")
+	deviceID := r.Header.Get("X-Device-ID")
+
+	// 防禦層 1：速率限制（每帳號滑動視窗）→ 429
+	if e2eRateLimited(accountID) {
+		sendJSON(w, http.StatusTooManyRequests, APIResponse{Status: "error", Error: "請求過於頻繁，請稍候再試"})
+		logAudit(accountID, "e2e_chat", "llama", r.RemoteAddr, deviceID, "denied", "rate_limited")
+		return
+	}
+
+	// 防禦層 2：重放檢查（iv 近期重複 = 重放，便宜先擋於解密前）→ 409
+	if e2eCheckReplay(env.IV) {
+		sendJSON(w, http.StatusConflict, APIResponse{Status: "error", Error: "重複的請求（疑似重放）已被拒絕"})
+		logAudit(accountID, "e2e_chat", "llama", r.RemoteAddr, deviceID, "denied", "replay_iv")
+		return
+	}
+
 	// E2E 解密：RSA 取出 K → AES-GCM 解密得明文 OpenAI 請求
 	plaintext, key, decErr := decryptE2EChat(env)
 	if decErr != nil {
 		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "E2E 解密失敗: " + decErr.Error()})
-		logAudit(r.Header.Get("X-Account-ID"), "e2e_chat", "llama", r.RemoteAddr, r.Header.Get("X-Device-ID"), "denied", decErr.Error())
+		logAudit(accountID, "e2e_chat", "llama", r.RemoteAddr, deviceID, "denied", decErr.Error())
 		return
+	}
+
+	// 防禦層 3：併發上限 → 429。僅對「會生成的串流請求」(stream:true) 設限，保護 GPU 不被灌爆 OOM；
+	// n_predict:0 暖機、標題生成等輕量非串流請求不佔名額，避免誤擋正常聊天（它們仍受速率限制保護）。
+	var probe struct {
+		Stream bool `json:"stream"`
+	}
+	_ = json.Unmarshal(plaintext, &probe)
+	if probe.Stream {
+		if !e2eAcquireSlot(accountID) {
+			sendJSON(w, http.StatusTooManyRequests, APIResponse{Status: "error", Error: "你已有推論進行中，請待其完成"})
+			logAudit(accountID, "e2e_chat", "llama", r.RemoteAddr, deviceID, "denied", "concurrency_limit")
+			return
+		}
+		defer e2eReleaseSlot(accountID)
 	}
 
 	// 用同一把 K 建立回應加密用的 GCM
@@ -1422,7 +1556,7 @@ func e2eChatHandler(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	logAudit(r.Header.Get("X-Account-ID"), "e2e_chat", "llama", r.RemoteAddr, r.Header.Get("X-Device-ID"), "success", "e2e_stream")
+	logAudit(accountID, "e2e_chat", "llama", r.RemoteAddr, deviceID, "success", "e2e_stream")
 }
 
 // webuiDistDir 是 forked llama-ui（SvelteKit）的建置產物目錄（index.html / bundle.js / bundle.css）
@@ -1553,6 +1687,9 @@ func main() {
 
 	// 預壓前端大檔（gzip），改善 bundle.js 載入速度
 	initWebuiAssets()
+
+	// 啟動 E2E 濫用防禦的背景清理（過期的重放 iv / 速率視窗紀錄）
+	go e2eCleanupLoop()
 
 	// ==================
 	// 路由設定

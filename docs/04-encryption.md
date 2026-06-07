@@ -117,6 +117,8 @@ data: <base64(iv)>.<base64(ciphertext+tag)>\n\n
 ```
 前端解密：從 `data:` 取出字串 → 以 `.` 分割 → base64 解碼 iv 與 ct → AES-GCM 解密 → 得原始 OpenAI SSE 片段。
 
+> **防重放**：伺服器快取近期見過的請求 `iv`（10 分鐘 TTL），重複者視為重放、回 `409`；配合每帳號速率限制與串流併發上限，阻止側錄封包重放榨乾 GPU（見 [07-api.md](07-api.md) 濫用防護）。
+
 > **金鑰 K**：每次請求由前端新生一把（RSA-OAEP 傳輸給伺服器），proxy 解密後以同一把 K 加密該次回應，請求結束即丟棄 —— 無伺服器端金鑰快取、不依賴 device_secret。
 > **加密範圍**：僅聊天內容（prompt + 回應）。metadata 端點（`/props`、`/v1/models`、`/slots` …）仍明文轉發。
 > **下游注意**：以下「IndexedDB 密鑰存儲」「手機重啟重連」等節描述的是 `/api/chat` 原始手機端設計；forked UI 的 `/api/e2e/chat` 採每請求金鑰 + Cookie 認證，不使用這些。

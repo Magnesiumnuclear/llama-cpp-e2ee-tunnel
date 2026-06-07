@@ -65,5 +65,6 @@
 ✅ 強制認證中間件（所有路由）  ✅ QR Code URL 格式  ✅ 資料庫自動 Migration
 ✅ L1/L2/L3 權限中間件  ✅ 手機端輪詢核准（HttpOnly Cookie）  ✅ RSA E2E 密鑰對自動生成
 ✅ 端到端加密（AES-256-GCM + RSA-OAEP + HMAC）  ✅ E2E 測試頁 /e2e-test
+✅ /api/e2e/chat 濫用防禦（iv 防重放 + 每帳號速率限制 + 串流併發上限）
 ✅ 自架 forked llama-ui（proxy 服務 + gzip 預壓）  ✅ 聊天串流 E2E 加密 /api/e2e/chat（P3）
 ⏳ Token 計費  ⏳ 資源限制隊列

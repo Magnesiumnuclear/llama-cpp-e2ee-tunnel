@@ -299,6 +299,11 @@ curl -H "Authorization: Bearer <token>" \
 ```
 > 注意：此格式使用 `iv` 欄位（非 `nonce`），且**無** `hmac_signature`（認證靠 HttpOnly cookie，完整性靠 AES-GCM tag）。
 
+**濫用防護（伺服器端，以 `account_id` 為鍵）：**
+- **速率限制**：每帳號 60 秒內逾 15 次 → `429`。
+- **防重放**：相同 `iv` 在 10 分鐘內重複 → `409`（防側錄封包重放榨乾 GPU）。
+- **串流併發上限**：每帳號同時僅 1 個串流推論（`stream:true`），逾限 → `429`。
+
 **回應格式：** `text/event-stream`，每個 SSE 幀為加密後的 llama.cpp 串流片段：
 ```
 data: <base64(iv)>.<base64(ciphertext+tag)>

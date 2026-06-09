@@ -56,3 +56,7 @@ __pycache__/
 *.db-shm
 *.db-wal
 *.db
+
+
+# 加密憑證（敏感資料）
+*.pem

@@ -1611,7 +1611,17 @@ func serveAsset(w http.ResponseWriter, r *http.Request, path, contentType string
 	http.ServeFile(w, r, path)
 }
 
-// uiOrProxyHandler：根路徑與前端資源由本地 forked UI 服務，其餘（/v1/* /props /slots /models ...）轉發 llama.cpp。
+// e2eBlockedGenPaths：直接呼叫的「生成類」端點一律封鎖 —— 聊天必須走 /api/e2e/chat
+// （E2E 加密 + 速率/重放/併發防禦）。用精確比對，保留 /v1/chat/completions/control（UI 結束推理用）與 metadata。
+var e2eBlockedGenPaths = map[string]bool{
+	"/v1/chat/completions": true,
+	"/v1/completions":      true,
+	"/completions":         true,
+	"/completion":          true,
+	"/infill":              true,
+}
+
+// uiOrProxyHandler：根路徑與前端資源由本地 forked UI 服務；封鎖明文生成後門端點；其餘轉發 llama.cpp。
 func uiOrProxyHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/":
@@ -1624,6 +1634,16 @@ func uiOrProxyHandler(w http.ResponseWriter, r *http.Request) {
 		serveAsset(w, r, webuiDistDir+"/bundle.css", "text/css; charset=utf-8", gzBundleCSS)
 		return
 	}
+
+	// 封鎖「直接打的明文生成端點」——繞過 E2E 與 DoS 防禦的後門（紅方在 Burp 證實可用）→ 403。
+	if e2eBlockedGenPaths[strings.TrimRight(r.URL.Path, "/")] {
+		accountID := r.Header.Get("X-Account-ID")
+		log.Printf("⛔ 阻擋明文生成端點直連: account=%s, path=%s\n", accountID, r.URL.Path)
+		logAudit(accountID, "blocked_gen_endpoint", r.URL.Path, r.RemoteAddr, r.Header.Get("X-Device-ID"), "denied", "plaintext_generation_bypass")
+		sendJSON(w, http.StatusForbidden, APIResponse{Status: "error", Error: "此端點已停用；聊天請改用 E2E 加密端點 /api/e2e/chat"})
+		return
+	}
+
 	proxyToLlamaAuthenticated(w, r)
 }
 

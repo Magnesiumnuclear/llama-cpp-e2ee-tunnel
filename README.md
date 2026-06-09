@@ -31,7 +31,7 @@
 | **llama.cpp（已安裝並運行）** | 本專案**連接**它的 server，需先讓 `llama-server` 監聽在 **http://127.0.0.1:8080/** |
 | **Go** | 編譯 / 運行代理層 |
 | **Node.js 18+** | 建置 fork 的 Web UI |
-| Cloudflare Tunnel（cloudflared，可選）| 公網存取 |
+| Cloudflare Tunnel（cloudflared，可選）| 公網存取（**需自行下載 `.exe`**，見下方）|
 | Python 3 + PyQt6（可選）| 一鍵控制面板 |
 
 啟動 llama.cpp 範例：
@@ -40,6 +40,8 @@
 ./llama-server -m your-model.gguf --host 127.0.0.1 --port 8080
 ```
 > 沒有先啟動 llama.cpp（8080 連不上），代理層雖能啟動，但聊天與 metadata 轉發會失敗。
+
+> **`cloudflared` 需自行下載**（`.gitignore` 排除了 `*.exe`，所以 repo **不含**此執行檔）：到 [Cloudflare cloudflared releases](https://github.com/cloudflare/cloudflared/releases) 下載 Windows 版，放到**專案根目錄**並命名為 `cloudflared-windows-386.exe`（或任何 `cloudflared*.exe`）—— 控制面板會自動偵測。其他平台請下載對應的 cloudflared 執行檔。不需要公網存取（純本機測試）則可略過。
 
 ---
 

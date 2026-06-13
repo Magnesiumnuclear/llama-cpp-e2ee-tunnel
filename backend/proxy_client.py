@@ -31,6 +31,35 @@ STATUS_VIEW = {
 }
 STATUS_FALLBACK_COLOR = "#90a4ae"
 
+# 代理層編譯快取：go build 的輸出檔，與「任一比它新就需重編」的來源檔。
+PROXY_EXE = "llama-proxy.exe"
+BUILD_SOURCES = ("main.go", "go.mod", "go.sum")
+
+
+def rebuild_reason(base_dir, exe_name=PROXY_EXE, sources=BUILD_SOURCES):
+    """判斷是否需要重新編譯。
+
+    需要時回傳「原因字串」（供 log 顯示），不需要時回傳 None。
+    規則：編譯結果不存在，或任一來源檔（main.go 等）的修改時間比它新。
+    """
+    exe_path = os.path.join(base_dir, exe_name)
+    if not os.path.exists(exe_path):
+        return f"{exe_name} 不存在"
+    try:
+        exe_mtime = os.path.getmtime(exe_path)
+    except OSError:
+        return f"無法讀取 {exe_name} 的時間"
+    for src in sources:
+        src_path = os.path.join(base_dir, src)
+        if not os.path.exists(src_path):
+            continue
+        try:
+            if os.path.getmtime(src_path) > exe_mtime:
+                return f"{src} 已變動"
+        except OSError:
+            return f"無法讀取 {src} 的時間"
+    return None
+
 
 def find_cloudflared():
     fixed = os.path.join(BASE_DIR, "cloudflared-windows-386.exe")

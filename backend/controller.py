@@ -26,8 +26,9 @@ from PyQt6.QtCore import (
 from PyQt6.QtGui import QPixmap, QDesktopServices, QGuiApplication
 
 from .proxy_client import (
-    BASE_DIR, PROXY_BASE, LOCAL_TARGET, STATUS_VIEW, STATUS_FALLBACK_COLOR,
-    TUNNEL_RE, find_cloudflared, kill_tree, http_get, http_post,
+    BASE_DIR, PROXY_BASE, LOCAL_TARGET, PROXY_EXE, STATUS_VIEW,
+    STATUS_FALLBACK_COLOR, TUNNEL_RE, rebuild_reason, find_cloudflared,
+    kill_tree, http_get, http_post,
 )
 from .models import DictListModel
 
@@ -87,13 +88,22 @@ class Controller(QObject):
         self.tunnel_proc.errorOccurred.connect(
             lambda e: self.log_line(f"✗ Tunnel 程序錯誤：{e}"))
 
-        # 子程序：go 代理層
+        # 子程序：go 代理層（執行 go build 產出的 llama-proxy.exe）
         self.proxy_proc = QProcess(self)
         self.proxy_proc.setWorkingDirectory(BASE_DIR)
         self.proxy_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.proxy_proc.readyReadStandardOutput.connect(self.on_proxy_output)
         self.proxy_proc.errorOccurred.connect(
             lambda e: self.log_line(f"✗ 代理層程序錯誤：{e}"))
+
+        # 子程序：go build（僅在 main.go 等來源變動時才執行，沿用既有編譯以減少等待）
+        self.build_proc = QProcess(self)
+        self.build_proc.setWorkingDirectory(BASE_DIR)
+        self.build_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
+        self.build_proc.readyReadStandardOutput.connect(self.on_build_output)
+        self.build_proc.errorOccurred.connect(
+            lambda e: self.log_line(f"✗ 編譯程序錯誤：{e}"))
+        self.build_proc.finished.connect(self._on_build_finished)
 
         # 健康檢查輪詢
         self.health_timer = QTimer(self)
@@ -193,12 +203,41 @@ class Controller(QObject):
     def start_proxy(self):
         if not self._public_url:
             return
+        # 判斷 main.go 等來源是否變動：有變動才編譯，否則沿用既有 exe（省去編譯等待）。
+        reason = rebuild_reason(BASE_DIR)
+        if reason:
+            self.log_line(f"⚙ 需重新編譯（{reason}）")
+            self._build_then_run()
+        else:
+            self.log_line(f"↻ 來源未變動，沿用既有編譯：{PROXY_EXE}")
+            self._run_proxy_exe()
+
+    def _build_then_run(self):
+        self._set_proxy_status("編譯中…（go build）", "idle")
+        self.log_line(f"編譯代理層：go build -o {PROXY_EXE} main.go")
+        self.build_proc.start(self.go_path, ["build", "-o", PROXY_EXE, "main.go"])
+
+    def _on_build_finished(self, code, _status):
+        # 編譯期間若已按「停止全部」，則不再啟動。
+        if not self.want_proxy:
+            self.log_line("（已取消編譯）")
+            return
+        exe_path = os.path.join(BASE_DIR, PROXY_EXE)
+        if code == 0 and os.path.exists(exe_path):
+            self.log_line("✓ 編譯完成")
+            self._run_proxy_exe()
+        else:
+            self._set_proxy_status("編譯失敗", "bad")
+            self.log_line(f"✗ 編譯失敗（exit {code}），請看上方 log 找原因")
+
+    def _run_proxy_exe(self):
+        exe_path = os.path.join(BASE_DIR, PROXY_EXE)
         env = QProcessEnvironment.systemEnvironment()
         env.insert("LLAMA_PUBLIC_URL", self._public_url)
         self.proxy_proc.setProcessEnvironment(env)
-        self._set_proxy_status("啟動中…（go 編譯中）", "idle")
-        self.log_line("啟動代理層：go run main.go")
-        self.proxy_proc.start(self.go_path, ["run", "main.go"])
+        self._set_proxy_status("啟動中…", "idle")
+        self.log_line(f"啟動代理層：{PROXY_EXE}")
+        self.proxy_proc.start(exe_path, [])
         self._health_attempts = 0
         self.health_timer.start(1000)
 
@@ -229,7 +268,7 @@ class Controller(QObject):
         self.health_timer.stop()
         self.want_proxy = False
         self._set_proxy_ready(False)
-        for proc in (self.proxy_proc, self.tunnel_proc):
+        for proc in (self.build_proc, self.proxy_proc, self.tunnel_proc):
             if proc.state() != QProcess.ProcessState.NotRunning:
                 kill_tree(int(proc.processId()))
                 proc.kill()
@@ -254,6 +293,10 @@ class Controller(QObject):
     def on_proxy_output(self):
         chunk = bytes(self.proxy_proc.readAllStandardOutput()).decode("utf-8", "replace")
         self.append_log("proxy", chunk)
+
+    def on_build_output(self):
+        chunk = bytes(self.build_proc.readAllStandardOutput()).decode("utf-8", "replace")
+        self.append_log("build", chunk)
 
     # ════════════════════════════════════════════════════════════
     #  QR 生成

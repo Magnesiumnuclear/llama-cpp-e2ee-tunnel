@@ -62,7 +62,9 @@ llama.cpp 代理層啟動（階段 3：強制認證版）
 
 ## 推薦：用控制面板一鍵啟動
 
-控制面板把上述步驟全自動化：啟動 Cloudflare Tunnel → 自動擷取公網 URL 填入 `LLAMA_PUBLIC_URL` → 帶該 URL 啟動 `go run main.go`，並提供 QR 生成、權限審核、帳號總覽（含 E2E 測試、刪除）。
+控制面板把上述步驟全自動化：啟動 Cloudflare Tunnel → 自動擷取公網 URL 填入 `LLAMA_PUBLIC_URL` → 帶該 URL 啟動代理層，並提供 QR 生成、權限審核、帳號總覽（含 E2E 測試、刪除）。
+
+> **增量編譯**：啟動代理層時會比對 `main.go` / `go.mod` / `go.sum` 與 `llama-proxy.exe` 的修改時間——**有變動才 `go build`，未變動則直接沿用既有 `llama-proxy.exe`**，省去每次編譯的等待。
 
 介面採 **Qt Quick (QML)**，並做到「前端介面 / 後端邏輯」完全分離：
 

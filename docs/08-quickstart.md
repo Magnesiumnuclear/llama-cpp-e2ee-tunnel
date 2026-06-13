@@ -62,14 +62,25 @@ llama.cpp 代理層啟動（階段 3：強制認證版）
 
 ## 推薦：用控制面板一鍵啟動
 
-`control_panel.py`（PyQt6）把上述步驟全自動化：啟動 Cloudflare Tunnel → 自動擷取公網 URL 填入 `LLAMA_PUBLIC_URL` → 帶該 URL 啟動 `go run main.go`，並提供 QR 生成、權限審核、帳號總覽。
+控制面板把上述步驟全自動化：啟動 Cloudflare Tunnel → 自動擷取公網 URL 填入 `LLAMA_PUBLIC_URL` → 帶該 URL 啟動 `go run main.go`，並提供 QR 生成、權限審核、帳號總覽（含 E2E 測試、刪除）。
+
+介面採 **Qt Quick (QML)**，並做到「前端介面 / 後端邏輯」完全分離：
+
+| 路徑 | 職責 |
+|------|------|
+| `control_panel.py` | 薄進入點：建立 App → 載入 QML → 注入後端 Controller |
+| `backend/proxy_client.py` | 純邏輯：常數、cloudflared 偵測、localhost HTTP（無 GUI 依賴） |
+| `backend/models.py` | QML 用清單模型（`DictListModel`） |
+| `backend/controller.py` | QObject 橋接層：子程序管理、健康輪詢、業務流程，對 QML 暴露 屬性／訊號／槽 |
+| `qml/` | Qt Quick 介面（漸層、動畫、滑動分頁）；`Theme.qml` 為共用設計語彙，其餘為可重用元件與三大分頁 |
 
 ```powershell
-# 首次需安裝：.\.venv\Scripts\python.exe -m pip install PyQt6
+# 首次需安裝（PyQt6 已含 QtQuick / QtQml 模組）：
+#   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe control_panel.py
 ```
 
-> 仍需先完成上方「建置 forked Web UI」。
+> 啟動指令不變；UI 重構不影響任何後端行為與 API。仍需先完成上方「建置 forked Web UI」。
 
 ## 完整測試流程（PowerShell）
 

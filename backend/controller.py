@@ -83,6 +83,7 @@ class Controller(QObject):
         self._qr_register_url = ""
         self._qr_expire_text = ""
         self._qr_placeholder = "尚未生成"
+        self._issued_qr_accounts = set()  # 本次階段已產生過 QR 的 account_id（重名加後綴用）
 
         # 重新登入連結
         self._relogin_url = ""
@@ -341,17 +342,43 @@ class Controller(QObject):
     # ════════════════════════════════════════════════════════════
     #  QR 生成
     # ════════════════════════════════════════════════════════════
+    def _dedup_account_id(self, name):
+        """重名時自動找出下一個可用的 name_N。
+
+        「已存在」＝既有帳號（/admin/accounts）或本次階段已產生過 QR 的名稱
+        （QR 產生時帳號尚未建立，故需自行記錄，才能讓連按兩次得到 _1、_2…）。
+        """
+        taken = set(self._issued_qr_accounts)
+        ok, resp = http_get("/admin/accounts")
+        if ok and resp.get("status") == "success":
+            for a in (resp.get("data") or []):
+                aid = a.get("account_id")
+                if aid:
+                    taken.add(aid)
+        if name not in taken:
+            return name
+        n = 1
+        while f"{name}_{n}" in taken:
+            n += 1
+        return f"{name}_{n}"
+
     @pyqtSlot(str)
     def generateQr(self, account_id):
         if not self._proxy_ready:
             self.warningRaised.emit("請先啟動服務（代理層就緒後才能生成 QR）。")
             return
         acc = (account_id or "").strip()
+        if acc:
+            # 重名不再合併既有帳號：自動找下一個可用的 name_N（第二次按生成→_2…）。
+            acc = self._dedup_account_id(acc)
         ok, resp = http_post("/admin/generate-qr", {"account_id": acc})
         if not ok or resp.get("status") != "success":
             self.warningRaised.emit(f"生成失敗：{resp.get('error') or resp.get('message')}")
             return
         d = resp.get("data", {})
+        used_id = d.get("account_id", acc)
+        if used_id:
+            self._issued_qr_accounts.add(used_id)
         png = os.path.join(BASE_DIR, d.get("qr_code_file", ""))
         pix = QPixmap(png)
         if pix.isNull():
@@ -492,7 +519,7 @@ class Controller(QObject):
         self.reloginTextChanged.emit()
         self.reloginReady.emit()
         self.log_line(f"重新登入連結已產生：{account_id}", "action")
-        self.refreshAccounts()
+        # 不呼叫 refreshAccounts()：產生連結不改變帳號清單，避免觸發總覽列表的滑入動畫重播。
 
     # ── 撤銷登入（JWT 撤銷）─────────────────────────────────────
     @pyqtSlot(str)

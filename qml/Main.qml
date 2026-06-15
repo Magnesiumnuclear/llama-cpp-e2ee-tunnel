@@ -91,6 +91,13 @@ ApplicationWindow {
                             opacity: backend.proxyReady ? 1.0 : 0.35
                             Behavior on opacity { NumberAnimation { duration: Theme.animMed } }
 
+                            // 進入「權限審核」分頁(index 1)時自動載入一次（不持續輪詢；
+                            // 已在此頁時有新請求仍需手動「重新整理」）。
+                            onCurrentIndexChanged: {
+                                if (currentIndex === 1 && backend.proxyReady)
+                                    backend.refreshPending();
+                            }
+
                             QrView { }
                             PendingView { confirm: confirmDialog }
                             AccountsView { confirm: confirmDialog }

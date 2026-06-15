@@ -1,65 +1,63 @@
-# 虛擬環境
+# ===== Python 虛擬環境 =====
+# 控制面板用的 venv，內含大量套件，不進版控
 .venv/
 venv/
 env/
 
-# 日誌檔案
+# ===== 日誌 =====
+# 所有 .log（含執行時產生的 proxy.log）
 *.log
-proxy.log
 
-# 資料庫（敏感資料）
+# ===== SQLite 資料庫（敏感資料，切勿提交）=====
+# 主資料庫 llama-proxy.db 與其 WAL/SHM 執行時檔案
 *.db
-llama-proxy.db
+*.db-shm
+*.db-wal
 
-# 備份檔案
+# ===== 備份檔 =====
 *.bak
 *.backup
 
-# 生成的 QR Code 圖片
-qrcode_*.png
-
-# 編譯產物
+# ===== 編譯產物 =====
+# Go / C 編譯輸出（含 llama-proxy.exe、main.exe、cloudflared*.exe）
 *.exe
 *.o
 *.so
 *.dylib
-
-# forked Web UI 編譯產物（npm run build 生成；提交源碼 webui/src，不提交建置輸出）
+# 任何以 build 結尾的目錄（build/、webui/build/ 等）
+*build/
+# forked Web UI 建置輸出：只提交源碼 webui/src，不提交 npm run build 的產物
 webui/dist/
 
-# IDE
+# ===== 產生的圖片 =====
+# 伺服器產生的 QR 圖（註冊 qrcode_*.png、重新登入 relogin_*.png 等）
+*.png
+
+# ===== 加密憑證（敏感資料）=====
+# RSA E2E 金鑰對：server_private.pem 為私鑰，啟動時自動生成
+*.pem
+
+# ===== 環境變數（可能含密鑰）=====
+.env
+.env.local
+
+# ===== 相依套件目錄 =====
+node_modules/
+__pycache__/
+*.pyc
+
+# ===== IDE / 編輯器 =====
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# OS
+# ===== 作業系統產生的檔案 =====
 .DS_Store
 Thumbs.db
 
-# 环境变量
-.env
-.env.local
-
-# Node/Python 依賴（以防後來添加）
-node_modules/
-__pycache__/
-*.pyc
-
-# 依賴鎖檔（可選，建議提交 go.sum）
-# go.sum  # 取消註釋如果不想提交
-
-# 臨時檔案
+# ===== 臨時檔 =====
 *.tmp
 *.temp
-# SQLite 運行時文件
-*.db-shm
-*.db-wal
-*.db
 
-
-# 加密憑證（敏感資料）
-*.pem
-
-
-*build/
+# 備註：go.sum 建議「提交」（鎖定依賴版本），故不在此忽略。

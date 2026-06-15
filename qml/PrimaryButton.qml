@@ -1,11 +1,14 @@
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Layouts
+import App.Icons 1.0
 
-// 漸層主要按鈕：滑入提亮、按下縮放，皆帶平滑動畫。
+// 漸層主要按鈕：滑入提亮、按下縮放，皆帶平滑動畫。可選 iconName 顯示向量圖示。
 Button {
     id: ctrl
     property color c1: Theme.accent1
     property color c2: Theme.accent2
+    property string iconName: ""
 
     hoverEnabled: true
     padding: 8
@@ -22,13 +25,24 @@ Button {
     opacity: enabled ? 1.0 : 0.4
     Behavior on opacity { NumberAnimation { duration: Theme.animMed } }
 
-    contentItem: Text {
-        text: ctrl.text
-        color: "white"
-        font: ctrl.font
-        horizontalAlignment: Text.AlignHCenter
-        verticalAlignment: Text.AlignVCenter
-        elide: Text.ElideRight
+    contentItem: RowLayout {
+        spacing: 7
+        VectorIcon {
+            visible: ctrl.iconName !== ""
+            Layout.preferredWidth: ctrl.font.pixelSize + 3
+            Layout.preferredHeight: ctrl.font.pixelSize + 3
+            Layout.alignment: Qt.AlignVCenter
+            name: ctrl.iconName
+            color: "white"
+        }
+        Text {
+            text: ctrl.text
+            color: "white"
+            font: ctrl.font
+            verticalAlignment: Text.AlignVCenter
+            Layout.alignment: Qt.AlignVCenter
+            elide: Text.ElideRight
+        }
     }
 
     background: Rectangle {

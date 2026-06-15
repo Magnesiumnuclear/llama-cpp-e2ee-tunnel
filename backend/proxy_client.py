@@ -22,12 +22,13 @@ LOCAL_TARGET = f"http://localhost:{PROXY_PORT}"
 TUNNEL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 CREATE_NO_WINDOW = 0x08000000  # Windows：呼叫 taskkill 時不彈出視窗
 
-# 帳號狀態 → (顯示文字, 代表色)
+# 帳號狀態 → (顯示文字, 代表色)。
+# 不含任何符號：圖示由 UI 依「狀態鍵」（active/pending_approval/...）自行繪製，邏輯與呈現分離。
 STATUS_VIEW = {
-    "active":           ("✅ 已通過", "#43a047"),
-    "pending_approval": ("⏳ 待審",   "#fb8c00"),
-    "rejected":         ("❌ 未通過", "#e53935"),
-    "disabled":         ("⛔ 已停用", "#78909c"),
+    "active":           ("已通過", "#43a047"),
+    "pending_approval": ("待審",   "#fb8c00"),
+    "rejected":         ("未通過", "#e53935"),
+    "disabled":         ("已停用", "#78909c"),
 }
 STATUS_FALLBACK_COLOR = "#90a4ae"
 

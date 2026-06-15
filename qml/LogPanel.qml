@@ -1,26 +1,33 @@
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
+import App.Icons 1.0
 
-// 執行記錄面板：等寬字、依前綴上色、新行淡入、自動捲到底（上限 2000 行）。
+// 執行記錄面板：每行依「種類(kind)」畫一個向量嚴重度圖示並上色，新行淡入、自動捲到底（上限 2000 行）。
 GlassCard {
     id: panel
 
-    function append(line) {
-        logModel.append({ "line": line });
+    function append(text, kind) {
+        logModel.append({ "text": text, "kind": kind || "info" });
         if (logModel.count > 2000)
             logModel.remove(0, logModel.count - 2000);
         listView.positionViewAtEnd();
     }
 
-    function lineColor(s) {
-        if (s.indexOf("✓") === 0 || s.indexOf("✅") === 0) return Theme.ok;
-        if (s.indexOf("✗") === 0 || s.indexOf("❌") === 0) return Theme.bad;
-        if (s.indexOf("⚠") === 0) return Theme.idle;
-        if (s.indexOf("🔑") === 0 || s.indexOf("🔐") === 0 || s.indexOf("🗑") === 0) return Theme.accent1;
-        if (s.indexOf("[tunnel]") === 0) return "#7fd1c9";
-        if (s.indexOf("[proxy]") === 0) return "#b6a6f0";
+    function kindColor(kind) {
+        if (kind === "success") return Theme.ok;
+        if (kind === "error") return Theme.bad;
+        if (kind === "warn") return Theme.idle;
+        if (kind === "action") return Theme.accent1;
         return Theme.textDim;
+    }
+
+    function kindIcon(kind) {
+        if (kind === "success") return "check";
+        if (kind === "error") return "cross";
+        if (kind === "warn") return "warning";
+        if (kind === "action") return "key";
+        return "dot";
     }
 
     ColumnLayout {
@@ -41,14 +48,26 @@ GlassCard {
                 NumberAnimation { property: "opacity"; from: 0; to: 1; duration: Theme.animMed }
             }
 
-            delegate: Text {
+            delegate: RowLayout {
                 width: ListView.view.width
-                text: line
-                color: panel.lineColor(line)
-                font.family: "Consolas"
-                font.pixelSize: 12
-                textFormat: Text.PlainText
-                wrapMode: Text.WrapAnywhere
+                spacing: 7
+                VectorIcon {
+                    Layout.preferredWidth: 13
+                    Layout.preferredHeight: 13
+                    Layout.alignment: Qt.AlignTop
+                    Layout.topMargin: 2
+                    name: panel.kindIcon(model.kind)
+                    color: panel.kindColor(model.kind)
+                }
+                Text {
+                    Layout.fillWidth: true
+                    text: model.text
+                    color: panel.kindColor(model.kind)
+                    font.family: "Consolas"
+                    font.pixelSize: 12
+                    textFormat: Text.PlainText
+                    wrapMode: Text.WrapAnywhere
+                }
             }
         }
     }

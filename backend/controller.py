@@ -36,7 +36,7 @@ from .models import DictListModel
 
 class Controller(QObject):
     # ── 對 QML 的訊號 ─────────────────────────────────────────
-    logAppended = pyqtSignal(str)
+    logAppended = pyqtSignal(str, str)   # (文字, 種類: info/success/error/warn/action)
     warningRaised = pyqtSignal(str)
     qrUpdated = pyqtSignal()             # 每次生成都觸發，QML 用來強制重載圖片
     reloginReady = pyqtSignal()          # 重新登入連結就緒，QML 開啟對話框並重載 QR
@@ -73,7 +73,8 @@ class Controller(QObject):
         # 狀態列文字 / 種類（ok / bad / idle）
         self._tunnel_text, self._tunnel_kind = "未運行", "bad"
         self._proxy_text, self._proxy_kind = "未運行", "bad"
-        self._build_mode_text = ""  # 「沿用上次編譯 / 編譯中 / 已重新編譯」
+        self._build_mode_text = ""   # 顯示文字（無符號）
+        self._build_mode_kind = ""   # reuse / building / rebuilt（UI 據此選圖示）
 
         # 計數與 QR 文字
         self._pending_count_text = "待審：—"
@@ -100,7 +101,7 @@ class Controller(QObject):
         self.tunnel_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.tunnel_proc.readyReadStandardOutput.connect(self.on_tunnel_output)
         self.tunnel_proc.errorOccurred.connect(
-            lambda e: self.log_line(f"✗ Tunnel 程序錯誤：{e}"))
+            lambda e: self.log_line(f"Tunnel 程序錯誤：{e}", "error"))
 
         # 子程序：go 代理層（執行 go build 產出的 llama-proxy.exe）
         self.proxy_proc = QProcess(self)
@@ -108,7 +109,7 @@ class Controller(QObject):
         self.proxy_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.proxy_proc.readyReadStandardOutput.connect(self.on_proxy_output)
         self.proxy_proc.errorOccurred.connect(
-            lambda e: self.log_line(f"✗ 代理層程序錯誤：{e}"))
+            lambda e: self.log_line(f"代理層程序錯誤：{e}", "error"))
 
         # 子程序：go build（僅在 main.go 等來源變動時才執行，沿用既有編譯以減少等待）
         self.build_proc = QProcess(self)
@@ -116,7 +117,7 @@ class Controller(QObject):
         self.build_proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.build_proc.readyReadStandardOutput.connect(self.on_build_output)
         self.build_proc.errorOccurred.connect(
-            lambda e: self.log_line(f"✗ 編譯程序錯誤：{e}"))
+            lambda e: self.log_line(f"編譯程序錯誤：{e}", "error"))
         self.build_proc.finished.connect(self._on_build_finished)
 
         # 健康檢查輪詢
@@ -153,6 +154,10 @@ class Controller(QObject):
     @pyqtProperty(str, notify=buildModeChanged)
     def buildModeText(self):
         return self._build_mode_text
+
+    @pyqtProperty(str, notify=buildModeChanged)
+    def buildModeKind(self):
+        return self._build_mode_kind
 
     @pyqtProperty(str, notify=pendingCountChanged)
     def pendingCountText(self):
@@ -209,7 +214,7 @@ class Controller(QObject):
     def boot(self):
         self.cloudflaredMissingChanged.emit()
         if not self.cloudflared:
-            self.log_line("⚠ 找不到 cloudflared 執行檔（cloudflared*.exe）")
+            self.log_line("找不到 cloudflared 執行檔（cloudflared*.exe）", "warn")
         self.log_line(f"go: {self.go_path}　工作目錄: {BASE_DIR}")
 
     # ════════════════════════════════════════════════════════════
@@ -236,12 +241,12 @@ class Controller(QObject):
         # 判斷 main.go 等來源是否變動：有變動才編譯，否則沿用既有 exe（省去編譯等待）。
         reason = rebuild_reason(BASE_DIR)
         if reason:
-            self.log_line(f"⚙ 需重新編譯（{reason}）")
-            self._set_build_mode("🔨 編譯中…")
+            self.log_line(f"需重新編譯（{reason}）")
+            self._set_build_mode("編譯中…", "building")
             self._build_then_run()
         else:
-            self.log_line(f"↻ 來源未變動，沿用既有編譯：{PROXY_EXE}")
-            self._set_build_mode("⚡ 沿用上次編譯")
+            self.log_line(f"來源未變動，沿用既有編譯：{PROXY_EXE}")
+            self._set_build_mode("沿用上次編譯", "reuse")
             self._run_proxy_exe()
 
     def _build_then_run(self):
@@ -256,12 +261,12 @@ class Controller(QObject):
             return
         exe_path = os.path.join(BASE_DIR, PROXY_EXE)
         if code == 0 and os.path.exists(exe_path):
-            self.log_line("✓ 編譯完成")
-            self._set_build_mode("🔨 已重新編譯")
+            self.log_line("編譯完成", "success")
+            self._set_build_mode("已重新編譯", "rebuilt")
             self._run_proxy_exe()
         else:
             self._set_proxy_status("編譯失敗", "bad")
-            self.log_line(f"✗ 編譯失敗（exit {code}），請看上方 log 找原因")
+            self.log_line(f"編譯失敗（exit {code}），請看上方 log 找原因", "error")
 
     def _run_proxy_exe(self):
         exe_path = os.path.join(BASE_DIR, PROXY_EXE)
@@ -280,7 +285,7 @@ class Controller(QObject):
         if self.proxy_proc.state() == QProcess.ProcessState.NotRunning and self._health_attempts > 2:
             self.health_timer.stop()
             self._set_proxy_status("啟動失敗", "bad")
-            self.log_line("✗ 代理層程序已結束（請看上方 log 找原因）")
+            self.log_line("代理層程序已結束（請看上方 log 找原因）", "error")
             return
         ok, resp = http_get("/health", timeout=1.0)
         if ok and resp.get("status") == "ok":
@@ -288,12 +293,12 @@ class Controller(QObject):
             self.on_proxy_ready()
         elif self._health_attempts >= 60:
             self.health_timer.stop()
-            self.log_line("✗ 等待代理層逾時（60 秒）")
+            self.log_line("等待代理層逾時（60 秒）", "error")
 
     def on_proxy_ready(self):
         self._set_proxy_ready(True)
         self._set_proxy_status("運行中", "ok")
-        self.log_line("✓ 代理層就緒，可開始生成 QR 與審核")
+        self.log_line("代理層就緒，可開始生成 QR 與審核", "success")
         self.refreshAccounts()
         self.refreshPending()
 
@@ -321,7 +326,7 @@ class Controller(QObject):
             if m:
                 self._set_public_url(m.group(0))
                 self._set_tunnel_status("運行中", "ok")
-                self.log_line(f"✓ 取得公網 URL：{self._public_url}")
+                self.log_line(f"取得公網 URL：{self._public_url}", "success")
                 if self.want_proxy and self.proxy_proc.state() == QProcess.ProcessState.NotRunning:
                     self.start_proxy()
 
@@ -352,7 +357,7 @@ class Controller(QObject):
         if pix.isNull():
             self._qr_image_url = ""
             self._qr_placeholder = "QR 圖讀取失敗"
-            self.log_line(f"✗ 讀不到 QR 圖：{png}")
+            self.log_line(f"讀不到 QR 圖：{png}", "error")
         else:
             self._qr_image_url = QUrl.fromLocalFile(png).toString()
             self._qr_placeholder = ""
@@ -365,7 +370,7 @@ class Controller(QObject):
         self.qrTextChanged.emit()
         self.qrUpdated.emit()
         self.log_line(
-            f"🔑 QR 生成：{d.get('account_id','')}（有效期 {d.get('expires_at','')}）")
+            f"QR 生成：{d.get('account_id','')}（有效期 {d.get('expires_at','')}）", "action")
 
     # ════════════════════════════════════════════════════════════
     #  權限審核
@@ -376,7 +381,7 @@ class Controller(QObject):
             return
         ok, resp = http_get("/admin/pending")
         if not ok:
-            self.log_line(f"✗ 待審清單讀取失敗：{resp.get('error')}")
+            self.log_line(f"待審清單讀取失敗：{resp.get('error')}", "error")
             return
         data = resp.get("data") or []
         rows = [{
@@ -396,7 +401,7 @@ class Controller(QObject):
             {"account_id": account_id, "permission": permission, "action": "approve"})
         if ok and resp.get("status") == "success":
             tok = (resp.get("data") or {}).get("session_token", "")
-            self.log_line(f"✅ 已核准 {account_id}（權限 {permission}）")
+            self.log_line(f"已核准 {account_id}（權限 {permission}）", "success")
             if tok:
                 self.log_line(f"   session_token：{tok[:40]}…")
             self.refreshPending()
@@ -410,7 +415,7 @@ class Controller(QObject):
         ok, resp = http_post(
             "/admin/approve", {"account_id": account_id, "action": "reject"})
         if ok and resp.get("status") == "success":
-            self.log_line(f"❌ 已拒絕 {account_id}")
+            self.log_line(f"已拒絕 {account_id}", "action")
             self.refreshPending()
             self.refreshAccounts()
         else:
@@ -425,7 +430,7 @@ class Controller(QObject):
             return
         ok, resp = http_get("/admin/accounts")
         if not ok:
-            self.log_line(f"✗ 帳號清單讀取失敗：{resp.get('error')}")
+            self.log_line(f"帳號清單讀取失敗：{resp.get('error')}", "error")
             return
         data = resp.get("data") or []
         counts = {"active": 0, "pending_approval": 0, "rejected": 0, "disabled": 0}
@@ -448,9 +453,9 @@ class Controller(QObject):
             })
         self._accounts_model.set_rows(rows)
         self._accounts_count_text = (
-            f"共 {len(data)}　|　✅ 已通過 {counts['active']}　"
-            f"⏳ 待審 {counts['pending_approval']}　"
-            f"❌ 未通過 {counts['rejected']}　⛔ 停用 {counts['disabled']}")
+            f"共 {len(data)}　|　已通過 {counts['active']}　"
+            f"待審 {counts['pending_approval']}　"
+            f"未通過 {counts['rejected']}　停用 {counts['disabled']}")
         self.accountsCountChanged.emit()
 
     @pyqtSlot(str)
@@ -458,7 +463,7 @@ class Controller(QObject):
         """確認動作由 QML 端負責；此處只執行刪除。"""
         ok, resp = http_post("/admin/delete-account", {"account_id": account_id})
         if ok and resp.get("status") == "success":
-            self.log_line(f"🗑 帳號已刪除：{account_id}")
+            self.log_line(f"帳號已刪除：{account_id}", "action")
             self.refreshAccounts()
         else:
             self.warningRaised.emit(f"刪除失敗：{resp.get('error') or resp.get('message')}")
@@ -486,7 +491,7 @@ class Controller(QObject):
             f"帳號：{account_id}　|　有效期至：{d.get('expires_at','')}（5 分鐘、單次使用）")
         self.reloginTextChanged.emit()
         self.reloginReady.emit()
-        self.log_line(f"↻ 重新登入連結已產生：{account_id}")
+        self.log_line(f"重新登入連結已產生：{account_id}", "action")
         self.refreshAccounts()
 
     # ── E2E 測試頁開啟 ─────────────────────────────────────────
@@ -508,7 +513,7 @@ class Controller(QObject):
             f"?token={urllib.parse.quote(token, safe='')}"
             f"&secret={urllib.parse.quote(secret, safe='')}"
         )
-        self.log_line(f"🔐 E2E 測試頁：{account_id}")
+        self.log_line(f"E2E 測試頁：{account_id}", "action")
         QDesktopServices.openUrl(QUrl(url))
 
     # ════════════════════════════════════════════════════════════
@@ -527,10 +532,10 @@ class Controller(QObject):
     def append_log(self, tag, text):
         for line in text.splitlines():
             if line.strip():
-                self.logAppended.emit(f"[{tag}] {line}")
+                self.logAppended.emit(f"[{tag}] {line}", "info")
 
-    def log_line(self, msg):
-        self.logAppended.emit(msg)
+    def log_line(self, msg, kind="info"):
+        self.logAppended.emit(msg, kind)
 
     # ── 內部狀態 setter（同時發出對應 notify 訊號）─────────────
     def _set_public_url(self, url):
@@ -551,6 +556,7 @@ class Controller(QObject):
         self._proxy_text, self._proxy_kind = text, kind
         self.proxyStatusChanged.emit()
 
-    def _set_build_mode(self, text):
+    def _set_build_mode(self, text, kind=""):
         self._build_mode_text = text
+        self._build_mode_kind = kind
         self.buildModeChanged.emit()

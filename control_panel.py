@@ -25,6 +25,7 @@ from PyQt6.QtGui import QGuiApplication
 from PyQt6.QtQml import QQmlApplicationEngine
 
 from backend import Controller
+from ui_icons import register_icons
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 QML_MAIN = os.path.join(BASE_DIR, "qml", "Main.qml")
@@ -33,6 +34,9 @@ QML_MAIN = os.path.join(BASE_DIR, "qml", "Main.qml")
 def main():
     app = QGuiApplication(sys.argv)
     app.setApplicationName("llama-proxy 控制面板")
+
+    # 註冊向量圖示型別給 QML（import App.Icons 1.0 → VectorIcon{}）
+    register_icons()
 
     controller = Controller()
 

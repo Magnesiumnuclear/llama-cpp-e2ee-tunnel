@@ -75,6 +75,7 @@ llama.cpp 代理層啟動（階段 3：強制認證版）
 | `backend/models.py` | QML 用清單模型（`DictListModel`） |
 | `backend/controller.py` | QObject 橋接層：子程序管理、健康輪詢、業務流程，對 QML 暴露 屬性／訊號／槽 |
 | `qml/` | Qt Quick 介面（漸層、動畫、滑動分頁）；`Theme.qml` 為共用設計語彙，其餘為可重用元件與三大分頁 |
+| `ui_icons/` | 向量圖示層：以 PyQt 2D 繪圖引擎（QPainter / `VectorIcon`）取代所有 Unicode 符號，純呈現、零後端依賴 |
 
 ```powershell
 # 首次需安裝（PyQt6 已含 QtQuick / QtQml 模組）：

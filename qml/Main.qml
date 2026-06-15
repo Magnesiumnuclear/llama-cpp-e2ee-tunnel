@@ -26,7 +26,7 @@ ApplicationWindow {
     Connections {
         target: backend
         function onWarningRaised(msg) { alertDialog.alert(msg); }
-        function onLogAppended(line) { logPanel.append(line); }
+        function onLogAppended(text, kind) { logPanel.append(text, kind); }
         function onReloginReady() { reloginDialog.showResult(); }
     }
 

@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
+import App.Icons 1.0
 
 // 分頁三：帳號總覽（已通過 / 未通過），含 E2E 與刪除操作。
 Item {
@@ -84,19 +85,33 @@ Item {
                                     font.bold: true
                                 }
                                 Rectangle {
-                                    radius: 8
-                                    height: 18
-                                    width: stView.implicitWidth + 16
+                                    radius: 9
+                                    height: 20
+                                    width: stRow.implicitWidth + 16
                                     color: Qt.rgba(statusColor.r, statusColor.g, statusColor.b, 0.18)
                                     border.width: 1
                                     border.color: Qt.rgba(statusColor.r, statusColor.g, statusColor.b, 0.5)
-                                    Text {
-                                        id: stView
+                                    RowLayout {
+                                        id: stRow
                                         anchors.centerIn: parent
-                                        text: statusView
-                                        color: statusColor
-                                        font.pixelSize: 11
-                                        font.bold: true
+                                        spacing: 5
+                                        VectorIcon {
+                                            Layout.preferredWidth: 13
+                                            Layout.preferredHeight: 13
+                                            Layout.alignment: Qt.AlignVCenter
+                                            name: status === "active" ? "check_circle"
+                                                : status === "pending_approval" ? "hourglass"
+                                                : status === "rejected" ? "cross_circle"
+                                                : status === "disabled" ? "ban" : "dot"
+                                            color: statusColor
+                                        }
+                                        Text {
+                                            text: statusView
+                                            color: statusColor
+                                            font.pixelSize: 11
+                                            font.bold: true
+                                            Layout.alignment: Qt.AlignVCenter
+                                        }
                                     }
                                 }
                             }
@@ -113,17 +128,20 @@ Item {
                         Item { Layout.fillWidth: true }
 
                         GhostButton {
-                            text: "↻ 重新登入"
+                            iconName: "relogin"
+                            text: "重新登入"
                             visible: isActive
                             onClicked: backend.reloginAccount(accountId)
                         }
                         GhostButton {
-                            text: "🔐 E2E"
+                            iconName: "lock"
+                            text: "E2E"
                             visible: isActive
                             onClicked: backend.openE2eTest(accountId)
                         }
                         GhostButton {
-                            text: "🗑 刪除"
+                            iconName: "trash"
+                            text: "刪除"
                             danger: true
                             onClicked: page.confirm.ask(
                                 "確認刪除",

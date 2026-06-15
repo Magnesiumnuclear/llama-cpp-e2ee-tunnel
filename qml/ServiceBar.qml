@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls.Basic
 import QtQuick.Layouts
+import App.Icons 1.0
 
 // 服務列：全部啟動／停止、Tunnel 與代理層狀態、公網 URL。
 // 高度依內容自動決定（不撐滿，故內層以 width 綁定、不使用 fillHeight）。
@@ -16,8 +17,8 @@ GlassCard {
             Layout.fillWidth: true
             spacing: 12
 
-            PrimaryButton { text: "▶ 全部啟動"; onClicked: backend.startAll() }
-            GhostButton { text: "■ 停止全部"; onClicked: backend.stopAll() }
+            PrimaryButton { iconName: "play"; text: "全部啟動"; onClicked: backend.startAll() }
+            GhostButton { iconName: "stop"; text: "停止全部"; onClicked: backend.stopAll() }
 
             Item { Layout.preferredWidth: 8 }
 
@@ -29,21 +30,32 @@ GlassCard {
             Text { text: "代理層"; color: Theme.textDim; font.pixelSize: 13 }
             StatusPill { label: backend.proxyStatusText; kind: backend.proxyStatusKind }
 
-            // 編譯狀態：沿用上次編譯 / 編譯中 / 已重新編譯
+            // 編譯狀態：沿用上次編譯（閃電）/ 編譯中・已重新編譯（鐵鎚）
             Rectangle {
                 visible: backend.buildModeText !== ""
                 Layout.preferredHeight: 22
-                Layout.preferredWidth: buildModeLabel.implicitWidth + 18
+                Layout.preferredWidth: buildModeRow.implicitWidth + 16
                 radius: 11
                 color: Qt.rgba(1, 1, 1, 0.06)
                 border.width: 1
                 border.color: Theme.surfaceBorder
-                Text {
-                    id: buildModeLabel
+                RowLayout {
+                    id: buildModeRow
                     anchors.centerIn: parent
-                    text: backend.buildModeText
-                    color: Theme.textDim
-                    font.pixelSize: 12
+                    spacing: 5
+                    VectorIcon {
+                        Layout.preferredWidth: 13
+                        Layout.preferredHeight: 13
+                        Layout.alignment: Qt.AlignVCenter
+                        name: backend.buildModeKind === "reuse" ? "bolt" : "hammer"
+                        color: Theme.textDim
+                    }
+                    Text {
+                        text: backend.buildModeText
+                        color: Theme.textDim
+                        font.pixelSize: 12
+                        Layout.alignment: Qt.AlignVCenter
+                    }
                 }
             }
 

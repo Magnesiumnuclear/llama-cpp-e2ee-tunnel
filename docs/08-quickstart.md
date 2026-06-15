@@ -77,6 +77,10 @@ llama.cpp 代理層啟動（階段 3：強制認證版）
 | `qml/` | Qt Quick 介面（漸層、動畫、滑動分頁）；`Theme.qml` 為共用設計語彙，其餘為可重用元件與三大分頁 |
 | `ui_icons/` | 向量圖示層：以 PyQt 2D 繪圖引擎（QPainter / `VectorIcon`）取代所有 Unicode 符號，純呈現、零後端依賴 |
 
+> **面板操作行為**：
+> - **QR 生成與預覽**：`account_id` 若與既有帳號（或本次階段已產生過的 QR）重名，會自動加後綴 `_1`、`_2`…，**不再覆蓋/合併既有帳號**；留空則由伺服器自動產生 `user_…`。
+> - **權限審核**：切換到此分頁時會**自動重新整理一次**；停留在頁面期間若有新的待審請求，仍需手動按「重新整理」。
+
 ```powershell
 # 首次需安裝（PyQt6 已含 QtQuick / QtQml 模組）：
 #   .\.venv\Scripts\python.exe -m pip install -r requirements.txt

@@ -4,20 +4,23 @@
 
 ## 六張資料表
 
-### 1. qr_codes — 一次性 QR Code 密鑰
+### 1. qr_codes — 一次性密鑰（掃碼註冊 + 重新登入共用）
 
 ```sql
 CREATE TABLE IF NOT EXISTS qr_codes (
     qr_code_id     TEXT PRIMARY KEY,
-    temp_key       TEXT UNIQUE,
+    temp_key       TEXT UNIQUE,           -- 註冊用 temp_key 或重新登入用 code
     account_id     TEXT,
     generated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    expires_at     TIMESTAMP,             -- 生成後 1 小時
-    used           BOOLEAN DEFAULT 0,     -- 掃描後立即設為 1
+    expires_at     TIMESTAMP,             -- 註冊：生成後 1 小時；重新登入：5 分鐘
+    used           BOOLEAN DEFAULT 0,     -- 使用後立即設為 1（單次使用）
     used_at        TIMESTAMP,
-    used_by_device TEXT
+    used_by_device TEXT,
+    kind           TEXT DEFAULT 'register' -- 'register'（掃碼註冊）/ 'relogin'（重新登入）
 );
 ```
+
+> `kind` 用來區分用途：`/auth/register` 只接受 `kind='register'`、`/auth/relogin` 只接受 `kind='relogin'`，避免重新登入 code 被重放到註冊流程而把 active 帳號打回待審。舊資料庫由啟動時的 `ALTER TABLE` 自動補上（預設 `register`）。
 
 ### 2. accounts — 帳號與設備資訊
 
@@ -32,7 +35,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     -- status 可為: pending_approval / active / disabled / rejected
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     approved_at      TIMESTAMP,
-    last_login       TIMESTAMP
+    last_login       TIMESTAMP            -- 每次「重新登入」(/auth/relogin) 成功時更新
 );
 ```
 

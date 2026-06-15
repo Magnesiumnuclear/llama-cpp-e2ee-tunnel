@@ -38,6 +38,9 @@
 | `approveAccountHandler()` | 電腦端核准 / 拒絕帳號 |
 | `listAccountsHandler()` | 列出所有帳號 |
 | `accountSecretsHandler()` | 取得帳號 session_token + device_secret（供控制面板 E2E 測試用） |
+| `reloginCodeHandler()` | 為既有 active 帳號鑄造一次性重新登入 code + QR（管理端） |
+| `reloginHandler()` | 公開重新登入：GET 顯示 CSRF 確認頁、POST 消耗 code 並重簽 JWT 種 Cookie |
+| `adminGate()` | 包住所有 /admin/* 端點，要求 X-Admin-Token（防公網 tunnel 直呼） |
 | `viewLogsHandler()` | 查看審計日誌（支援 ?limit=N） |
 | `publicKeyHandler()` | 回傳伺服器 RSA E2E 公鑰（SPKI PEM） |
 | `chatHandler()` | 聊天端點（L2+，支援明文與 E2E 加密，附審計日誌） |
@@ -67,4 +70,5 @@
 ✅ 端到端加密（AES-256-GCM + RSA-OAEP + HMAC）  ✅ E2E 測試頁 /e2e-test
 ✅ /api/e2e/chat 濫用防禦（iv 防重放 + 每帳號速率限制 + 串流併發上限）
 ✅ 自架 forked llama-ui（proxy 服務 + gzip 預壓）  ✅ 聊天串流 E2E 加密 /api/e2e/chat（P3）
+✅ 重新登入（一次性 code + CSRF 確認頁，換網址/重啟/關頁後恢復）  ✅ /admin/* X-Admin-Token 防護
 ⏳ Token 計費  ⏳ 資源限制隊列

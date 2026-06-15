@@ -216,8 +216,22 @@ curl http://127.0.0.1:8081/admin/logs?limit=100
 回傳指定 `active` 帳號的最新 `session_token` 與 `device_secret`，供控制面板一鍵開啟 E2E 測試頁使用。
 
 ```bash
-curl "http://127.0.0.1:8081/admin/account-secrets?account_id=user_001"
+curl "http://127.0.0.1:8081/admin/account-secrets?account_id=user_001" -H "X-Admin-Token: <token>"
 ```
+
+回應（成功）：
+```json
+{
+  "status": "success",
+  "data": {
+    "account_id": "user_001",
+    "session_token": "eyJ...",
+    "device_secret": "a3f9b2c1..."
+  }
+}
+```
+
+錯誤碼：`400` 缺少 account_id | `403` 帳號非 active 或無 X-Admin-Token | `404` 帳號不存在 | `500` 找不到 Session
 
 ---
 
@@ -257,6 +271,7 @@ Content-Type: application/json
 
 ```bash
 POST /admin/delete-account
+X-Admin-Token: <token>
 Content-Type: application/json
 
 { "account_id": "user_001" }
@@ -267,23 +282,7 @@ Content-Type: application/json
 { "status": "success", "message": "帳號 user_001 已刪除" }
 ```
 
-錯誤碼：`400` 缺少 account_id | `404` 帳號不存在
-
-回應（成功）：
-```json
-{
-  "status": "success",
-  "data": {
-    "account_id": "user_001",
-    "session_token": "eyJ...",
-    "device_secret": "a3f9b2c1..."
-  }
-}
-```
-
-錯誤碼：`400` 缺少 account_id | `403` 帳號非 active | `404` 帳號不存在 | `500` 找不到 Session
-
-> ⚠️ 此端點回傳高敏感資料，生產環境**必須**額外加上 IP 白名單（僅允許 127.0.0.1 存取）。
+錯誤碼：`400` 缺少 account_id | `403` 無 X-Admin-Token | `404` 帳號不存在
 
 ---
 

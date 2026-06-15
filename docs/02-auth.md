@@ -50,6 +50,26 @@
   → 設置 X-Account-ID / X-Device-ID / X-Permission Header
 ```
 
+## 重新登入（換網址 / 重啟 / 關閉網頁後恢復）
+
+由於 `serverSecret`（JWT 簽名金鑰）在**每次 proxy 重啟時重新隨機產生**，且 Cloudflare Tunnel 的公網網址會變動、登入 Cookie 綁定在舊網址 host，因此重啟 / 換網址 / 關閉網頁後，既有帳號可能無法直接登入。「重新登入」讓 `active` 帳號免重跑 QR 審核即可恢復，且 `account_id` 不變 → 對話歷史完整保留。
+
+```
+1. 電腦端（控制面板）：POST /admin/relogin-code { account_id }   （需 X-Admin-Token）
+   → 在 qr_codes 表鑄造一次性 code（kind='relogin'，5 分鐘 TTL）
+   → 回傳 relogin_url（綁目前公網 host）+ 伺服器端產生的 QR PNG（不回傳 JWT）
+2. 使用者：在「目前網址」開啟 GET /auth/relogin?code=...
+   → 顯示同源確認頁（內含以 serverSecret 簽章的 CSRF token；此時不消耗 code）
+3. 使用者按「確認登入」：POST /auth/relogin { code, csrf }
+   → 驗證 CSRF → 原子性消耗 code → 重新確認帳號 active
+   → 一律重簽新 JWT（因 serverSecret 已更換）→ setSessionCookie → 302 轉址 /
+   → 更新 accounts.last_login
+```
+
+- 長效 90 天 JWT **永不出現在 URL**；URL 只含一次性、5 分鐘的 code。
+- 安全性：`/admin/relogin-code` 受 `X-Admin-Token` 保護；確認頁用 CSRF token 防跨站強制登入；code 單次使用。
+- 端點詳見 [07-api.md](07-api.md)。
+
 ## 帳號狀態機
 
 ```

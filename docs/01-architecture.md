@@ -79,7 +79,7 @@
 ## 六張核心資料表
 
 ```
-qr_codes      → 一次性 QR Code 密鑰
+qr_codes      → 一次性密鑰（掃碼註冊 + 重新登入共用，以 kind 區分）
 accounts      → 帳號與設備資訊
 sessions      → JWT session/refresh token
 conversations → 對話記錄（含 token 統計）

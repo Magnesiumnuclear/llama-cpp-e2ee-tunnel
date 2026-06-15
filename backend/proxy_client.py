@@ -95,9 +95,25 @@ def _request(req, timeout):
         return False, {"error": str(e)}
 
 
+# /admin/* 端點的授權 token（由控制面板啟動時隨機產生，同時注入 proxy 的 LLAMA_ADMIN_TOKEN env）。
+# 隨每個請求帶上 X-Admin-Token；公網 tunnel 攻擊者不知此值，故無法呼叫 /admin/*。
+ADMIN_TOKEN = ""
+
+
+def set_admin_token(token):
+    global ADMIN_TOKEN
+    ADMIN_TOKEN = token or ""
+
+
+def _add_admin_header(req):
+    if ADMIN_TOKEN:
+        req.add_header("X-Admin-Token", ADMIN_TOKEN)
+    return req
+
+
 def http_get(path, timeout=5.0):
     req = urllib.request.Request(PROXY_BASE + path, method="GET")
-    return _request(req, timeout)
+    return _request(_add_admin_header(req), timeout)
 
 
 def http_post(path, payload, timeout=8.0):
@@ -106,4 +122,4 @@ def http_post(path, payload, timeout=8.0):
         PROXY_BASE + path, data=data, method="POST",
         headers={"Content-Type": "application/json"},
     )
-    return _request(req, timeout)
+    return _request(_add_admin_header(req), timeout)

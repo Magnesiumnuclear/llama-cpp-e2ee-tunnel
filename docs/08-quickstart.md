@@ -86,10 +86,13 @@ llama.cpp 代理層啟動（階段 3：強制認證版）
 
 ## 完整測試流程（PowerShell）
 
+> **`/admin/*` 端點需 `X-Admin-Token`**：手動測試時，啟動 proxy 前先設定 `$env:LLAMA_ADMIN_TOKEN = "任意隨機字串"`，並在每個 `/admin/*` 請求帶上 `-Headers @{ "X-Admin-Token" = $env:LLAMA_ADMIN_TOKEN }`（未設定 token 時 admin 端點一律回 `403`）。由控制面板啟動時此 token 會自動產生與帶上。
+
 ```powershell
+$adminHdr = @{ "X-Admin-Token" = $env:LLAMA_ADMIN_TOKEN }
 # 1. 生成 QR Code
 $body = @{account_id="test_user"} | ConvertTo-Json
-$qr = Invoke-RestMethod -Uri "http://127.0.0.1:8081/admin/generate-qr" -Method POST -ContentType "application/json" -Body $body
+$qr = Invoke-RestMethod -Uri "http://127.0.0.1:8081/admin/generate-qr" -Method POST -ContentType "application/json" -Body $body -Headers $adminHdr
 $tempKey = $qr.data.temp_key
 Write-Host "temp_key: $tempKey"
 
@@ -100,7 +103,7 @@ Write-Host "狀態: $($reg.data.status)"
 
 # 3. 電腦端核准
 $approveBody = @{ account_id="test_user"; permission="L2"; action="approve" } | ConvertTo-Json
-$approved = Invoke-RestMethod -Uri "http://127.0.0.1:8081/admin/approve" -Method POST -ContentType "application/json" -Body $approveBody
+$approved = Invoke-RestMethod -Uri "http://127.0.0.1:8081/admin/approve" -Method POST -ContentType "application/json" -Body $approveBody -Headers $adminHdr
 $token = $approved.data.session_token
 
 # 4. 驗證 Token

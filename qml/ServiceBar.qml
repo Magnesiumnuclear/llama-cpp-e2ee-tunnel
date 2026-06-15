@@ -29,6 +29,24 @@ GlassCard {
             Text { text: "代理層"; color: Theme.textDim; font.pixelSize: 13 }
             StatusPill { label: backend.proxyStatusText; kind: backend.proxyStatusKind }
 
+            // 編譯狀態：沿用上次編譯 / 編譯中 / 已重新編譯
+            Rectangle {
+                visible: backend.buildModeText !== ""
+                Layout.preferredHeight: 22
+                Layout.preferredWidth: buildModeLabel.implicitWidth + 18
+                radius: 11
+                color: Qt.rgba(1, 1, 1, 0.06)
+                border.width: 1
+                border.color: Theme.surfaceBorder
+                Text {
+                    id: buildModeLabel
+                    anchors.centerIn: parent
+                    text: backend.buildModeText
+                    color: Theme.textDim
+                    font.pixelSize: 12
+                }
+            }
+
             Item { Layout.fillWidth: true }
         }
 

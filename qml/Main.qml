@@ -27,6 +27,7 @@ ApplicationWindow {
         target: backend
         function onWarningRaised(msg) { alertDialog.alert(msg); }
         function onLogAppended(line) { logPanel.append(line); }
+        function onReloginReady() { reloginDialog.showResult(); }
     }
 
     ColumnLayout {
@@ -119,4 +120,5 @@ ApplicationWindow {
     // 重複利用的對話框：確認（拒絕/刪除）與提醒（錯誤訊息）。
     ModalDialog { id: confirmDialog }
     ModalDialog { id: alertDialog }
+    ReloginDialog { id: reloginDialog }
 }

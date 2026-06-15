@@ -107,7 +107,28 @@ GET /auth/poll?account_id=user_001&device_secret=a3f9...
 
 ---
 
-## 管理端點（電腦端調用，無 JWT 保護）
+### GET / POST /auth/relogin — 重新登入（解決換網址 / 關閉網頁後無法登入）
+
+公開端點，自我授權於一次性 code（由控制面板 `/admin/relogin-code` 產生）。
+用於 Cloudflare Tunnel 換網址、或使用者關閉網頁後，讓既有 `active` 帳號在**目前公網網址**重新取得登入 Cookie，`account_id` 不變（對話歷史保留）。
+
+```
+GET  /auth/relogin?code=<一次性 code>   → 顯示同源確認頁（不消耗 code）
+POST /auth/relogin  (code, csrf)        → 消耗 code、重簽 JWT、種 Cookie、302 轉址 /
+```
+
+- 長效 90 天 JWT **永不出現在 URL**；URL 只含一次性、5 分鐘 TTL 的 code。
+- 確認頁的表單帶有以 serverSecret 簽章的 **CSRF token**（防跨站強制登入）。
+- code 單次使用（原子消耗）；`serverSecret` 每次重啟更換，故每次重新登入都會重簽新 JWT。
+
+錯誤碼：`400` code 無效/已使用/已過期 或 CSRF 不符 | `403` 帳號非 active
+
+---
+
+## 管理端點（電腦端調用，需 X-Admin-Token）
+
+> **全部 `/admin/*` 端點皆需帶 `X-Admin-Token` 標頭**（值＝控制面板啟動時隨機產生、以 `LLAMA_ADMIN_TOKEN` env 注入 proxy 的 token）。
+> 因 cloudflared 以 `--url http://localhost:8081` 連入、tunnel 流量的 RemoteAddr 也是 loopback，無法用 IP 判斷；改以「只有面板知道的 token」授權。未帶或不符一律 `403`。此 token 不出現在任何 URL 或對外回應。
 
 ### POST /admin/generate-qr — 生成 QR Code
 
@@ -197,6 +218,36 @@ curl http://127.0.0.1:8081/admin/logs?limit=100
 ```bash
 curl "http://127.0.0.1:8081/admin/account-secrets?account_id=user_001"
 ```
+
+---
+
+### POST /admin/relogin-code — 產生重新登入連結（供控制面板）
+
+為既有 `active` 帳號鑄造一次性、5 分鐘 TTL 的重新登入 code，並以伺服器端 go-qrcode 產生對應 QR PNG。
+連結綁定**目前公網 host**（`publicURL`）。回傳 `relogin_url` / `qr_code_file` / `expires_at`，**不回傳任何 JWT**。
+
+```bash
+POST /admin/relogin-code
+X-Admin-Token: <token>
+Content-Type: application/json
+
+{ "account_id": "user_001" }
+```
+
+回應（成功）：
+```json
+{
+  "status": "success",
+  "data": {
+    "account_id": "user_001",
+    "relogin_url": "https://xxx.trycloudflare.com/auth/relogin?code=...",
+    "qr_code_file": "relogin_user_001.png",
+    "expires_at": "2026-06-15 14:30:00"
+  }
+}
+```
+
+錯誤碼：`400` 缺少 account_id | `403` 無 X-Admin-Token | `404` 帳號不存在 | `409` 帳號非 active 或公網 HTTPS URL 尚未就緒
 
 ---
 

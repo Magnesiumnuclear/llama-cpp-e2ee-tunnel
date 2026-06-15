@@ -362,6 +362,9 @@ func initDB() error {
 		"ALTER TABLE audit_logs ADD COLUMN device_id TEXT",
 		"ALTER TABLE audit_logs ADD COLUMN request_data TEXT",
 		"ALTER TABLE audit_logs ADD COLUMN response_data TEXT",
+		// 區分 qr_codes 的用途：'register'（掃碼註冊）vs 'relogin'（重新登入）。
+		// 舊資料列預設為 'register'，避免 relogin code 被拿去 /auth/register 重放。
+		"ALTER TABLE qr_codes ADD COLUMN kind TEXT DEFAULT 'register'",
 	}
 	for _, m := range migrations {
 		db.Exec(m) // 忽略錯誤：欄位已存在時 SQLite 會回傳錯誤，屬正常情況
@@ -649,7 +652,7 @@ func registerDeviceHandler(w http.ResponseWriter, r *http.Request) {
 	var expiresAt time.Time
 	var used bool
 	err := db.QueryRow(
-		"SELECT qr_code_id, account_id, expires_at, used FROM qr_codes WHERE temp_key = ?",
+		"SELECT qr_code_id, account_id, expires_at, used FROM qr_codes WHERE temp_key = ? AND kind = 'register'",
 		req.TempKey,
 	).Scan(&qrCodeID, &accountID, &expiresAt, &used)
 
@@ -765,6 +768,26 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, token string) {
 }
 
 // --- 管理端點（電腦端調用） ---
+
+// adminGate 保護所有 /admin/* 端點：要求帶正確的 X-Admin-Token。
+//
+// 為何不用 RemoteAddr/loopback 判斷：cloudflared 以 `--url http://localhost:8081` 連入，
+// 所有 tunnel 流量的 RemoteAddr 也是 loopback，無法藉此區分「本機控制面板」與「公網攻擊者」。
+// 改用「只有控制面板知道的一次性隨機 token」（啟動時以 LLAMA_ADMIN_TOKEN env 注入）做授權，
+// 此 token 不會出現在任何 URL 或對外回應中。未設定 token 時一律拒絕（僅面板會用到 /admin/*）。
+func adminGate(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		expected := strings.TrimSpace(os.Getenv("LLAMA_ADMIN_TOKEN"))
+		got := r.Header.Get("X-Admin-Token")
+		if expected == "" || subtle.ConstantTimeCompare([]byte(got), []byte(expected)) != 1 {
+			io.Copy(io.Discard, r.Body) // 先排空請求 body，避免提前回應導致 POST 連線被重置
+			sendJSON(w, http.StatusForbidden, APIResponse{Status: "error", Error: "管理端點僅限本機控制面板"})
+			logAudit("unknown", "admin_gate", r.URL.Path, r.RemoteAddr, "", "denied", "bad_admin_token")
+			return
+		}
+		next(w, r)
+	}
+}
 
 // 生成 QR Code
 func generateQRHandler(w http.ResponseWriter, r *http.Request) {
@@ -1117,6 +1140,235 @@ func accountSecretsHandler(w http.ResponseWriter, r *http.Request) {
 			"device_secret": deviceSecret,
 		},
 	})
+}
+
+// --- 重新登入（解決 tunnel 換網址 / 關閉網頁後無法登入）---
+//
+// 設計重點：長效 90 天 JWT 永不進入 URL；URL 只含一次性、5 分鐘 TTL 的 relogin code。
+// 流程：面板（adminGate 保護）鑄造 code → 使用者在「目前公網 host」開 /auth/relogin?code=...
+// → GET 顯示同源確認頁（不消耗 code）→ 同源 POST 才原子性消耗 code、重簽 JWT、種 cookie、轉址 /。
+// account_id 全程不變，故對話歷史天然保留（為未來「對話保留」鋪路）。
+
+// POST /admin/relogin-code — 為既有 active 帳號鑄造一次性重新登入連結（含伺服器端 QR）。
+func reloginCodeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		sendJSON(w, http.StatusMethodNotAllowed, APIResponse{Status: "error", Error: "只接受 POST"})
+		return
+	}
+	var req struct {
+		AccountID string `json:"account_id"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.AccountID == "" {
+		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "account_id 為必填"})
+		return
+	}
+	// 拒絕在非 HTTPS 公網 URL 下產生帶憑證的連結（cookie 會綁到 localhost／非 Secure）。
+	if !strings.HasPrefix(publicURL, "https://") {
+		sendJSON(w, http.StatusConflict, APIResponse{Status: "error", Error: "公網 HTTPS URL 尚未就緒，無法產生重新登入連結"})
+		return
+	}
+	var status string
+	if err := db.QueryRow("SELECT status FROM accounts WHERE account_id = ?", req.AccountID).Scan(&status); err != nil {
+		sendJSON(w, http.StatusNotFound, APIResponse{Status: "error", Error: "找不到此帳號"})
+		return
+	}
+	if status != "active" {
+		sendJSON(w, http.StatusConflict, APIResponse{
+			Status: "error",
+			Error:  fmt.Sprintf("帳號狀態為 %s，非 active，無法重新登入", status),
+		})
+		return
+	}
+
+	code := generateSecureKey(16)
+	qrCodeID := generateID("relogin")
+	expiresAt := time.Now().Add(5 * time.Minute)
+	_, err := db.Exec(`
+		INSERT INTO qr_codes (qr_code_id, temp_key, account_id, generated_at, expires_at, used, kind)
+		VALUES (?, ?, ?, ?, ?, 0, 'relogin')
+	`, qrCodeID, code, req.AccountID, time.Now(), expiresAt)
+	if err != nil {
+		sendJSON(w, http.StatusInternalServerError, APIResponse{Status: "error", Error: err.Error()})
+		return
+	}
+
+	// 連結綁定「目前公網 host」（與面板 self._public_url 同源）。
+	reloginURL := fmt.Sprintf("%s/auth/relogin?code=%s", publicURL, code)
+	filename := fmt.Sprintf("relogin_%s.png", req.AccountID)
+	if err := qrcode.WriteFile(reloginURL, qrcode.Medium, 256, filename); err != nil {
+		sendJSON(w, http.StatusInternalServerError, APIResponse{Status: "error", Error: err.Error()})
+		return
+	}
+
+	logAudit("admin", "mint_relogin", req.AccountID, r.RemoteAddr, "", "success", "")
+	sendJSON(w, http.StatusOK, APIResponse{
+		Status:  "success",
+		Message: "重新登入連結已產生",
+		Data: map[string]string{
+			"account_id":   req.AccountID,
+			"relogin_url":  reloginURL,
+			"qr_code_file": filename,
+			"expires_at":   expiresAt.Format("2006-01-02 15:04:05"),
+		},
+	})
+}
+
+// GET/POST /auth/relogin — 公開端點（自我授權於一次性 code）。
+// GET：僅驗證 code 並顯示同源確認頁，不消耗。POST：同源檢查 → 原子消耗 → 重簽 JWT → 種 cookie → 轉址 /。
+func reloginHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("Cache-Control", "no-store, private")
+
+	switch r.Method {
+	case http.MethodGet:
+		code := r.URL.Query().Get("code")
+		accountID, ok := lookupReloginCode(code)
+		if !ok {
+			reloginErrorPage(w, "連結無效、已使用或已過期，請回電腦端重新產生。")
+			return
+		}
+		reloginConfirmPage(w, code, accountID)
+
+	case http.MethodPost:
+		// CSRF 防護：確認表單帶有以 serverSecret 對 code 簽章的 token。跨站頁面因 CORS 無法讀取
+		// 我們的確認頁內容，也就拿不到此 token、無法偽造登入 POST。比 Origin/Referer 標頭可靠
+		// （不受瀏覽器是否送出標頭、以及 Referrer-Policy: no-referrer 影響）。
+		r.ParseForm()
+		code := r.FormValue("code")
+		csrf := r.FormValue("csrf")
+		if code == "" || subtle.ConstantTimeCompare([]byte(csrf), []byte(reloginCSRF(code))) != 1 {
+			reloginErrorPage(w, "請求來源無效，請回電腦端重新產生連結。")
+			logAudit("unknown", "relogin", "account", r.RemoteAddr, "", "denied", "bad_csrf")
+			return
+		}
+
+		// 原子性消耗：唯一一筆 used=0 且未過期的 relogin code 才會被消耗。
+		mu.Lock()
+		res, _ := db.Exec(
+			"UPDATE qr_codes SET used = 1, used_at = ? WHERE temp_key = ? AND used = 0 AND kind = 'relogin' AND expires_at > ?",
+			time.Now(), code, time.Now())
+		var affected int64
+		if res != nil {
+			affected, _ = res.RowsAffected()
+		}
+		var accountID string
+		if affected == 1 {
+			db.QueryRow("SELECT account_id FROM qr_codes WHERE temp_key = ?", code).Scan(&accountID)
+		}
+		mu.Unlock()
+		if affected != 1 || accountID == "" {
+			reloginErrorPage(w, "連結無效、已使用或已過期，請回電腦端重新產生。")
+			return
+		}
+
+		// 消耗後再次確認帳號 active，並從 accounts 取 device_id/permission（不信任 client）。
+		var deviceID, permission, status string
+		err := db.QueryRow(
+			"SELECT device_id, permission_level, status FROM accounts WHERE account_id = ?", accountID,
+		).Scan(&deviceID, &permission, &status)
+		if err != nil || status != "active" {
+			reloginErrorPage(w, "帳號未啟用或不存在，無法登入。")
+			logAudit(accountID, "relogin", "account", r.RemoteAddr, deviceID, "denied", "account_inactive")
+			return
+		}
+		if permission == "" {
+			permission = "L2"
+		}
+
+		// serverSecret 每次重啟會更換 → 一律重簽新 JWT，確保 cookie 對目前 secret 有效。
+		sessionToken, err := generateJWT(accountID, deviceID, permission, 90*24*time.Hour)
+		if err != nil {
+			reloginErrorPage(w, "登入失敗（JWT 生成錯誤）。")
+			return
+		}
+		refreshToken, _ := generateJWT(accountID, deviceID, permission, 2*365*24*time.Hour)
+
+		// 清掉同 account+device 的舊 session 列再插入新的，避免重複登入造成列數無限增長。
+		db.Exec("DELETE FROM sessions WHERE account_id = ? AND device_id = ?", accountID, deviceID)
+		sessionID := generateID("session")
+		db.Exec(`
+			INSERT INTO sessions (session_id, account_id, device_id, session_token, refresh_token, created_at, expires_at, last_activity)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`, sessionID, accountID, deviceID, sessionToken, refreshToken, time.Now(), time.Now().Add(90*24*time.Hour), time.Now())
+
+		// 寫入目前 schema 有欄位卻從未被更新的 last_login（供總覽顯示／未來保留策略）。
+		db.Exec("UPDATE accounts SET last_login = ? WHERE account_id = ?", time.Now(), accountID)
+
+		setSessionCookie(w, r, sessionToken)
+		logAudit(accountID, "relogin", "account", r.RemoteAddr, deviceID, "success", "")
+		http.Redirect(w, r, "/", http.StatusSeeOther)
+
+	default:
+		sendJSON(w, http.StatusMethodNotAllowed, APIResponse{Status: "error", Error: "只接受 GET/POST"})
+	}
+}
+
+// lookupReloginCode 僅驗證（不消耗）一枚有效的 relogin code，回傳其 account_id。
+func lookupReloginCode(code string) (string, bool) {
+	if code == "" {
+		return "", false
+	}
+	var accountID string
+	err := db.QueryRow(
+		"SELECT account_id FROM qr_codes WHERE temp_key = ? AND kind = 'relogin' AND used = 0 AND expires_at > ?",
+		code, time.Now(),
+	).Scan(&accountID)
+	if err != nil {
+		return "", false
+	}
+	return accountID, true
+}
+
+// reloginCSRF 以 serverSecret 對 code 簽章，作為確認表單的 CSRF token（同步器 token 模式）。
+// 跨站頁面因 CORS 無法讀取我們確認頁的內容，故拿不到此 token，也就無法偽造登入 POST；
+// 不依賴 Origin/Referer 標頭，避免瀏覽器差異與 Referrer-Policy: no-referrer 造成的誤判。
+func reloginCSRF(code string) string {
+	mac := hmac.New(sha256.New, serverSecret)
+	mac.Write([]byte("relogin:" + code))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func reloginConfirmPage(w http.ResponseWriter, code, accountID string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>重新登入</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:linear-gradient(160deg,#0d1024,#1b2148);font-family:system-ui,"Microsoft JhengHei",sans-serif;color:#eef1ff}
+.card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:16px;
+padding:32px 28px;max-width:340px;text-align:center}
+h1{font-size:18px;margin:0 0 8px}p{color:#9aa3c8;font-size:14px;margin:0 0 22px;line-height:1.5}
+b{color:#eef1ff}button{width:100%%;padding:12px;border:0;border-radius:10px;color:#fff;font-size:15px;
+font-weight:700;cursor:pointer;background:linear-gradient(90deg,#6a8dff,#9b6bff)}
+</style></head><body><div class="card">
+<h1>重新登入</h1>
+<p>以帳號 <b>%s</b> 登入並還原你的對話？</p>
+<form method="post" action="/auth/relogin">
+<input type="hidden" name="code" value="%s">
+<input type="hidden" name="csrf" value="%s">
+<button type="submit">確認登入</button>
+</form></div></body></html>`, htmlEscape(accountID), htmlEscape(code), reloginCSRF(code))
+}
+
+func reloginErrorPage(w http.ResponseWriter, msg string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusBadRequest)
+	fmt.Fprintf(w, `<!DOCTYPE html><html lang="zh-Hant"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>重新登入</title><style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:linear-gradient(160deg,#0d1024,#1b2148);font-family:system-ui,"Microsoft JhengHei",sans-serif;color:#eef1ff}
+.card{background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:16px;
+padding:32px 28px;max-width:340px;text-align:center}
+p{color:#9aa3c8;font-size:14px;margin:0;line-height:1.5}
+</style></head><body><div class="card"><p>%s</p></div></body></html>`, htmlEscape(msg))
+}
+
+// htmlEscape 對插入 HTML 的字串做最小轉義，避免 account_id 等內容造成注入。
+func htmlEscape(s string) string {
+	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;")
+	return r.Replace(s)
 }
 
 // --- 需認證的端點 ---
@@ -1694,6 +1946,11 @@ func main() {
 	serverSecret = []byte(generateSecureKey(32))
 	log.Println("✓ 伺服器密鑰已生成")
 
+	// /admin/* 改為需要 X-Admin-Token（由控制面板注入）。未設定時 admin 端點全數鎖定。
+	if strings.TrimSpace(os.Getenv("LLAMA_ADMIN_TOKEN")) == "" {
+		log.Println("⚠️  LLAMA_ADMIN_TOKEN 未設定，/admin/* 端點已鎖定（僅控制面板可用）")
+	}
+
 	// 初始化資料庫
 	if err := initDB(); err != nil {
 		log.Fatalf("資料庫初始化失敗: %v\n", err)
@@ -1719,19 +1976,21 @@ func main() {
 	http.HandleFunc("/health", healthHandler)
 	http.HandleFunc("/auth/register", registerDeviceHandler)
 	http.HandleFunc("/auth/poll", pollStatusHandler)
+	http.HandleFunc("/auth/relogin", reloginHandler)                            // 重新登入（自我授權於一次性 code）
 	http.HandleFunc("/api/public-key", publicKeyHandler)                        // RSA E2E 公鑰（前端加密用）
 	http.HandleFunc("/e2e-test", func(w http.ResponseWriter, r *http.Request) { // E2E 加密測試頁（開發用）
 		http.ServeFile(w, r, "e2e_test.html")
 	})
 
-	// 管理端點（電腦端調用，生產環境應限制 IP）
-	http.HandleFunc("/admin/generate-qr", generateQRHandler)
-	http.HandleFunc("/admin/pending", pendingAccountsHandler)
-	http.HandleFunc("/admin/approve", approveAccountHandler)
-	http.HandleFunc("/admin/accounts", listAccountsHandler)
-	http.HandleFunc("/admin/logs", viewLogsHandler)
-	http.HandleFunc("/admin/account-secrets", accountSecretsHandler) // 供控制面板取得 token+secret 開啟 E2E 測試頁
-	http.HandleFunc("/admin/delete-account", deleteAccountHandler)   // 刪除帳號
+	// 管理端點（電腦端調用）：全部以 adminGate 保護，僅本機控制面板（持 X-Admin-Token）可呼叫。
+	http.HandleFunc("/admin/generate-qr", adminGate(generateQRHandler))
+	http.HandleFunc("/admin/pending", adminGate(pendingAccountsHandler))
+	http.HandleFunc("/admin/approve", adminGate(approveAccountHandler))
+	http.HandleFunc("/admin/accounts", adminGate(listAccountsHandler))
+	http.HandleFunc("/admin/logs", adminGate(viewLogsHandler))
+	http.HandleFunc("/admin/account-secrets", adminGate(accountSecretsHandler)) // 供控制面板取得 token+secret 開啟 E2E 測試頁
+	http.HandleFunc("/admin/delete-account", adminGate(deleteAccountHandler))   // 刪除帳號
+	http.HandleFunc("/admin/relogin-code", adminGate(reloginCodeHandler))       // 為既有帳號產生重新登入連結
 
 	// 需認證的端點
 	http.HandleFunc("/auth/verify", authMiddleware(verifyTokenHandler, "L1"))

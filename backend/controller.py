@@ -16,6 +16,7 @@
 """
 
 import os
+import secrets
 import shutil
 import urllib.parse
 
@@ -28,7 +29,7 @@ from PyQt6.QtGui import QPixmap, QDesktopServices, QGuiApplication
 from .proxy_client import (
     BASE_DIR, PROXY_BASE, LOCAL_TARGET, PROXY_EXE, STATUS_VIEW,
     STATUS_FALLBACK_COLOR, TUNNEL_RE, rebuild_reason, find_cloudflared,
-    kill_tree, http_get, http_post,
+    kill_tree, http_get, http_post, set_admin_token,
 )
 from .models import DictListModel
 
@@ -38,6 +39,9 @@ class Controller(QObject):
     logAppended = pyqtSignal(str)
     warningRaised = pyqtSignal(str)
     qrUpdated = pyqtSignal()             # 每次生成都觸發，QML 用來強制重載圖片
+    reloginReady = pyqtSignal()          # 重新登入連結就緒，QML 開啟對話框並重載 QR
+    reloginTextChanged = pyqtSignal()
+    buildModeChanged = pyqtSignal()      # 顯示「沿用上次編譯 / 重新編譯」
 
     tunnelStatusChanged = pyqtSignal()
     proxyStatusChanged = pyqtSignal()
@@ -55,6 +59,10 @@ class Controller(QObject):
         self.cloudflared = find_cloudflared()
         self.go_path = shutil.which("go") or "go"
 
+        # /admin/* 授權 token：本機隨機產生，HTTP 請求帶 X-Admin-Token、proxy 以 env 接收。
+        self._admin_token = secrets.token_hex(32)
+        set_admin_token(self._admin_token)
+
         # 狀態旗標
         self._public_url = ""
         self._proxy_ready = False
@@ -65,6 +73,7 @@ class Controller(QObject):
         # 狀態列文字 / 種類（ok / bad / idle）
         self._tunnel_text, self._tunnel_kind = "未運行", "bad"
         self._proxy_text, self._proxy_kind = "未運行", "bad"
+        self._build_mode_text = ""  # 「沿用上次編譯 / 編譯中 / 已重新編譯」
 
         # 計數與 QR 文字
         self._pending_count_text = "待審：—"
@@ -73,6 +82,11 @@ class Controller(QObject):
         self._qr_register_url = ""
         self._qr_expire_text = ""
         self._qr_placeholder = "尚未生成"
+
+        # 重新登入連結
+        self._relogin_url = ""
+        self._relogin_qr_image_url = ""
+        self._relogin_expire_text = ""
 
         # QML 清單模型
         self._pending_model = DictListModel(
@@ -136,6 +150,10 @@ class Controller(QObject):
     def proxyReady(self):
         return self._proxy_ready
 
+    @pyqtProperty(str, notify=buildModeChanged)
+    def buildModeText(self):
+        return self._build_mode_text
+
     @pyqtProperty(str, notify=pendingCountChanged)
     def pendingCountText(self):
         return self._pending_count_text
@@ -159,6 +177,18 @@ class Controller(QObject):
     @pyqtProperty(str, notify=qrTextChanged)
     def qrPlaceholder(self):
         return self._qr_placeholder
+
+    @pyqtProperty(str, notify=reloginTextChanged)
+    def reloginUrl(self):
+        return self._relogin_url
+
+    @pyqtProperty(str, notify=reloginTextChanged)
+    def reloginQrImageUrl(self):
+        return self._relogin_qr_image_url
+
+    @pyqtProperty(str, notify=reloginTextChanged)
+    def reloginExpireText(self):
+        return self._relogin_expire_text
 
     @pyqtProperty(bool, notify=cloudflaredMissingChanged)
     def cloudflaredMissing(self):
@@ -207,9 +237,11 @@ class Controller(QObject):
         reason = rebuild_reason(BASE_DIR)
         if reason:
             self.log_line(f"⚙ 需重新編譯（{reason}）")
+            self._set_build_mode("🔨 編譯中…")
             self._build_then_run()
         else:
             self.log_line(f"↻ 來源未變動，沿用既有編譯：{PROXY_EXE}")
+            self._set_build_mode("⚡ 沿用上次編譯")
             self._run_proxy_exe()
 
     def _build_then_run(self):
@@ -225,6 +257,7 @@ class Controller(QObject):
         exe_path = os.path.join(BASE_DIR, PROXY_EXE)
         if code == 0 and os.path.exists(exe_path):
             self.log_line("✓ 編譯完成")
+            self._set_build_mode("🔨 已重新編譯")
             self._run_proxy_exe()
         else:
             self._set_proxy_status("編譯失敗", "bad")
@@ -234,6 +267,7 @@ class Controller(QObject):
         exe_path = os.path.join(BASE_DIR, PROXY_EXE)
         env = QProcessEnvironment.systemEnvironment()
         env.insert("LLAMA_PUBLIC_URL", self._public_url)
+        env.insert("LLAMA_ADMIN_TOKEN", self._admin_token)
         self.proxy_proc.setProcessEnvironment(env)
         self._set_proxy_status("啟動中…", "idle")
         self.log_line(f"啟動代理層：{PROXY_EXE}")
@@ -274,6 +308,7 @@ class Controller(QObject):
                 proc.kill()
         self._set_proxy_status("未運行", "bad")
         self._set_tunnel_status("未運行", "bad")
+        self._set_build_mode("")
         self.log_line("已停止所有服務")
 
     # ── 子程序輸出 ─────────────────────────────────────────────
@@ -428,6 +463,32 @@ class Controller(QObject):
         else:
             self.warningRaised.emit(f"刪除失敗：{resp.get('error') or resp.get('message')}")
 
+    # ── 重新登入連結 ───────────────────────────────────────────
+    @pyqtSlot(str)
+    def reloginAccount(self, account_id):
+        """為既有 active 帳號產生一次性重新登入連結 + QR（解決換網址／關閉網頁後無法登入）。"""
+        if not self._proxy_ready:
+            self.warningRaised.emit("請先啟動服務（代理層就緒後才能產生重新登入連結）。")
+            return
+        if not self._public_url:
+            self.warningRaised.emit("公網 URL 尚未就緒，無法產生重新登入連結。")
+            return
+        ok, resp = http_post("/admin/relogin-code", {"account_id": account_id})
+        if not ok or resp.get("status") != "success":
+            self.warningRaised.emit(f"產生失敗：{resp.get('error') or resp.get('message')}")
+            return
+        d = resp.get("data", {})
+        self._relogin_url = d.get("relogin_url", "")
+        png = os.path.join(BASE_DIR, d.get("qr_code_file", ""))
+        pix = QPixmap(png)
+        self._relogin_qr_image_url = QUrl.fromLocalFile(png).toString() if not pix.isNull() else ""
+        self._relogin_expire_text = (
+            f"帳號：{account_id}　|　有效期至：{d.get('expires_at','')}（5 分鐘、單次使用）")
+        self.reloginTextChanged.emit()
+        self.reloginReady.emit()
+        self.log_line(f"↻ 重新登入連結已產生：{account_id}")
+        self.refreshAccounts()
+
     # ── E2E 測試頁開啟 ─────────────────────────────────────────
     @pyqtSlot(str)
     def openE2eTest(self, account_id):
@@ -489,3 +550,7 @@ class Controller(QObject):
     def _set_proxy_status(self, text, kind):
         self._proxy_text, self._proxy_kind = text, kind
         self.proxyStatusChanged.emit()
+
+    def _set_build_mode(self, text):
+        self._build_mode_text = text
+        self.buildModeChanged.emit()

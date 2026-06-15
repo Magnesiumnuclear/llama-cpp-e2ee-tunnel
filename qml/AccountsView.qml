@@ -113,6 +113,11 @@ Item {
                         Item { Layout.fillWidth: true }
 
                         GhostButton {
+                            text: "↻ 重新登入"
+                            visible: isActive
+                            onClicked: backend.reloginAccount(accountId)
+                        }
+                        GhostButton {
                             text: "🔐 E2E"
                             visible: isActive
                             onClicked: backend.openE2eTest(accountId)

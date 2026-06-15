@@ -162,8 +162,8 @@ llama-server.exe ^
  --parallel 1 ^
  -c 131072 ^
  -t 16 ^
- -b 2048 ^
- -ub 2048 ^
+ -b 4096 ^
+ -ub 4096 ^
  --cache-type-k q4_0 ^
  --cache-type-v q4_0 ^
  --context-shift ^

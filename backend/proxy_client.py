@@ -19,6 +19,9 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PROXY_PORT = 8081
 PROXY_BASE = f"http://127.0.0.1:{PROXY_PORT}"
 LOCAL_TARGET = f"http://localhost:{PROXY_PORT}"
+# /admin/* 改由獨立的「僅本機」listener 服務（tunnel 物理上碰不到）。
+ADMIN_PORT = 8082
+ADMIN_BASE = f"http://127.0.0.1:{ADMIN_PORT}"
 TUNNEL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 CREATE_NO_WINDOW = 0x08000000  # Windows：呼叫 taskkill 時不彈出視窗
 
@@ -112,15 +115,20 @@ def _add_admin_header(req):
     return req
 
 
+def _base_for(path):
+    """/admin/* 走僅本機的管理 listener（:8082），其餘走對外服務（:8081）。"""
+    return ADMIN_BASE if path.startswith("/admin/") else PROXY_BASE
+
+
 def http_get(path, timeout=5.0):
-    req = urllib.request.Request(PROXY_BASE + path, method="GET")
+    req = urllib.request.Request(_base_for(path) + path, method="GET")
     return _request(_add_admin_header(req), timeout)
 
 
 def http_post(path, payload, timeout=8.0):
     data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
-        PROXY_BASE + path, data=data, method="POST",
+        _base_for(path) + path, data=data, method="POST",
         headers={"Content-Type": "application/json"},
     )
     return _request(_add_admin_header(req), timeout)

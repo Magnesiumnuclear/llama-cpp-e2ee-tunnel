@@ -112,6 +112,7 @@ https://your-tunnel.trycloudflare.com/auth/register?temp_key=a1b2c3d4...&account
 | device_secret 不符 | 403 | 輪詢時身分驗證失敗 |
 | 帳號不存在 | 404 | 輪詢時找不到帳號 |
 | JWT 無效 | 401 | 簽名錯誤或過期 |
+| Token 已被撤銷 | 401 | 帳號執行了 `/admin/revoke-sessions`，token 的 iat 早於 `tokens_valid_after`，需重新登入 |
 | 帳號非 active | 403 | 未核准或已停用 |
 
 → API 端點詳見 [07-api.md](07-api.md)

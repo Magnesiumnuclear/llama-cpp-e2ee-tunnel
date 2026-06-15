@@ -126,17 +126,27 @@
 <script>
 'use strict';
 
-// ── URL 參數自動填入（控制面板一鍵開啟時自動帶入憑證）────────────────
-// 支援 ?token=xxx&secret=yyy，值為 URL-encoded（Python urllib.parse.quote 產生）
-(function autoFillFromURL() {
-  const p = new URLSearchParams(location.search);
-  const token  = p.get('token');
-  const secret = p.get('secret');
-  if (token)  document.getElementById('sessionToken').value = token;
-  if (secret) document.getElementById('deviceSecret').value = secret;
-  // 填入後立即清除 URL 中的敏感參數，防止 Referrer / 瀏覽器歷史洩漏
-  if (token || secret) {
-    history.replaceState(null, '', location.pathname);
+// ── 以一次性 code 換取憑證（控制面板一鍵開啟時帶入）──────────────────
+// 控制面板開啟 /e2e-test?code=xxx；URL 只含短效一次性 code，不含長效 token/secret。
+// 頁面 POST /e2e-test/exchange { code } 於「回應 body」換回 session_token + device_secret。
+(async function autoFillFromCode() {
+  const code = new URLSearchParams(location.search).get('code');
+  if (!code) return;
+  // 立即從網址移除 code，避免 Referrer / 瀏覽器歷史洩漏
+  history.replaceState(null, '', location.pathname);
+  try {
+    const res = await fetch('/e2e-test/exchange', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    const data = await res.json();
+    if (data.status === 'success' && data.data) {
+      document.getElementById('sessionToken').value = data.data.session_token || '';
+      document.getElementById('deviceSecret').value = data.data.device_secret || '';
+    }
+  } catch (e) {
+    /* 交換失敗 → 留空，使用者可手動填入 */
   }
 })();
 

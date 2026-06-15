@@ -40,7 +40,12 @@
 | `accountSecretsHandler()` | 取得帳號 session_token + device_secret（供控制面板 E2E 測試用） |
 | `reloginCodeHandler()` | 為既有 active 帳號鑄造一次性重新登入 code + QR（管理端） |
 | `reloginHandler()` | 公開重新登入：GET 顯示 CSRF 確認頁、POST 消耗 code 並重簽 JWT 種 Cookie |
-| `adminGate()` | 包住所有 /admin/* 端點，要求 X-Admin-Token（防公網 tunnel 直呼） |
+| `e2eCodeHandler()` | 為 E2E 測試頁鑄造一次性憑證交換 code（管理端） |
+| `e2eExchangeHandler()` | 公開：以一次性 code 於回應 body 換取 session_token + device_secret（不入 URL） |
+| `revokeSessionsHandler()` | 撤銷帳號所有 token（設 tokens_valid_after，憑證外洩止血） |
+| `insertOneTimeCode()` / `consumeOneTimeCode()` / `lookupOneTimeCode()` | 一次性 code 共用工具（relogin / e2e 以 kind 區分） |
+| `adminGate()` | 包住所有 /admin/* 端點，要求 X-Admin-Token（縱深防禦） |
+| `main()` 雙 listener | 對外服務 `:8081`(publicMux) 與管理 API `127.0.0.1:8082`(adminMux) 物理隔離；tunnel 只映射 :8081 |
 | `viewLogsHandler()` | 查看審計日誌（支援 ?limit=N） |
 | `publicKeyHandler()` | 回傳伺服器 RSA E2E 公鑰（SPKI PEM） |
 | `chatHandler()` | 聊天端點（L2+，支援明文與 E2E 加密，附審計日誌） |
@@ -71,4 +76,6 @@
 ✅ /api/e2e/chat 濫用防禦（iv 防重放 + 每帳號速率限制 + 串流併發上限）
 ✅ 自架 forked llama-ui（proxy 服務 + gzip 預壓）  ✅ 聊天串流 E2E 加密 /api/e2e/chat（P3）
 ✅ 重新登入（一次性 code + CSRF 確認頁，換網址/重啟/關頁後恢復）  ✅ /admin/* X-Admin-Token 防護
+✅ 移除 ?token= URL 認證回退（長效 JWT 不入網址）  ✅ E2E 測試頁改一次性 code 交換（憑證不入 URL）
+✅ /admin/* 獨立 loopback listener（127.0.0.1:8082，tunnel 碰不到）  ✅ JWT 撤銷（tokens_valid_after epoch，可即時止血）
 ⏳ Token 計費  ⏳ 資源限制隊列

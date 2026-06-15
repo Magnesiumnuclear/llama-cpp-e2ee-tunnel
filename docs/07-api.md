@@ -37,14 +37,31 @@ curl http://127.0.0.1:8081/api/public-key
 
 ### GET /e2e-test — E2E 加密測試網頁（開發用）
 
-提供互動式 Web Crypto API 測試工具，支援 URL 參數自動填入憑證（由控制面板傳入）。
+提供互動式 Web Crypto API 測試工具。控制面板開啟時帶入**一次性 code**（不再把長效 token/secret 放進 URL）。
 
 ```
 GET /e2e-test
-GET /e2e-test?token=eyJ...&secret=a3f9...   ← 控制面板點「E2E 測試」按鈕時帶入
+GET /e2e-test?code=<一次性 code>   ← 控制面板點「E2E 測試」按鈕時帶入（由 /admin/e2e-code 產生）
 ```
 
+頁面載入後會 `POST /e2e-test/exchange { code }`，於**回應 body**換回 `session_token` + `device_secret` 並填入欄位，隨即從網址移除 code。
+
 > ⚠️ 此頁面僅供開發使用，生產環境建議移除對此路由的服務。
+
+---
+
+### POST /e2e-test/exchange — 以一次性 code 換取 E2E 測試憑證
+
+公開端點，自我授權於一次性 `e2e` code（由 `/admin/e2e-code` 產生）。原子性消耗 code、確認帳號 `active` 後，於**回應 body**回傳重簽的 `session_token` 與 `device_secret`（憑證**不入 URL**）。
+
+```bash
+POST /e2e-test/exchange
+Content-Type: application/json
+
+{ "code": "<一次性 code>" }
+```
+
+錯誤碼：`400` code 無效/已使用/已過期 | `403` 帳號非 active
 
 ---
 
@@ -125,10 +142,11 @@ POST /auth/relogin  (code, csrf)        → 消耗 code、重簽 JWT、種 Cooki
 
 ---
 
-## 管理端點（電腦端調用，需 X-Admin-Token）
+## 管理端點（僅本機 `127.0.0.1:8082`，需 X-Admin-Token）
 
-> **全部 `/admin/*` 端點皆需帶 `X-Admin-Token` 標頭**（值＝控制面板啟動時隨機產生、以 `LLAMA_ADMIN_TOKEN` env 注入 proxy 的 token）。
-> 因 cloudflared 以 `--url http://localhost:8081` 連入、tunnel 流量的 RemoteAddr 也是 loopback，無法用 IP 判斷；改以「只有面板知道的 token」授權。未帶或不符一律 `403`。此 token 不出現在任何 URL 或對外回應。
+> **`/admin/*` 只在獨立的「僅本機」listener `127.0.0.1:8082` 上服務**，與對外的 `:8081` 公開服務物理隔離 —— cloudflared 只映射 `:8081`，故 tunnel 永遠碰不到 `/admin/*`。
+> **縱深防禦**：admin listener 仍要求 `X-Admin-Token` 標頭（值＝控制面板啟動時隨機產生、以 `LLAMA_ADMIN_TOKEN` env 注入 proxy 的 token），擋掉本機其他程序未持 token 的呼叫。未帶或不符一律 `403`；此 token 不出現在任何 URL 或對外回應。
+> 下列範例中的 `http://127.0.0.1:8081/admin/...` 一律改為 `http://127.0.0.1:8082/admin/...`。
 
 ### POST /admin/generate-qr — 生成 QR Code
 
@@ -211,9 +229,10 @@ curl http://127.0.0.1:8081/admin/logs?limit=100
 
 ---
 
-### GET /admin/account-secrets — 取得帳號憑證（供控制面板 E2E 測試用）
+### GET /admin/account-secrets — 取得帳號憑證
 
-回傳指定 `active` 帳號的最新 `session_token` 與 `device_secret`，供控制面板一鍵開啟 E2E 測試頁使用。
+回傳指定 `active` 帳號的最新 `session_token` 與 `device_secret`。
+（控制面板的「E2E 測試」按鈕已改走 `/admin/e2e-code` + `/e2e-test/exchange` 的一次性 code 流程，不再用此端點把憑證帶進 URL；此端點保留供手動取用，仍受 `X-Admin-Token` 保護。）
 
 ```bash
 curl "http://127.0.0.1:8081/admin/account-secrets?account_id=user_001" -H "X-Admin-Token: <token>"
@@ -262,6 +281,40 @@ Content-Type: application/json
 ```
 
 錯誤碼：`400` 缺少 account_id | `403` 無 X-Admin-Token | `404` 帳號不存在 | `409` 帳號非 active 或公網 HTTPS URL 尚未就緒
+
+---
+
+### POST /admin/e2e-code — 產生 E2E 測試頁一次性 code（供控制面板）
+
+為 `active` 帳號鑄造一次性、5 分鐘 TTL 的 `e2e` code，供 E2E 測試頁以 `POST /e2e-test/exchange` 換取憑證。**回應只含 code，不含任何 token/secret**。
+
+```bash
+POST /admin/e2e-code
+X-Admin-Token: <token>
+Content-Type: application/json
+
+{ "account_id": "user_001" }
+```
+
+回應（成功）：`{ "status": "success", "data": { "account_id", "code", "expires_at" } }`
+
+錯誤碼：`400` 缺少 account_id | `403` 無 X-Admin-Token | `404` 帳號不存在 | `409` 帳號非 active
+
+---
+
+### POST /admin/revoke-sessions — 撤銷帳號所有 token（憑證外洩止血）
+
+把帳號的 `tokens_valid_after` 設為現在的 Unix 秒數：所有簽發時間更早的 JWT 立即失效（`authMiddleware` 會擋下），並清除其 sessions 列。帳號**不會被停用**，使用者重新登入（取得 `iat` 較新的 token）即可恢復。用於懷疑 token 外洩時的即時止血。
+
+```bash
+POST /admin/revoke-sessions
+X-Admin-Token: <token>
+Content-Type: application/json
+
+{ "account_id": "user_001" }
+```
+
+錯誤碼：`400` 缺少 account_id | `403` 無 X-Admin-Token | `404` 帳號不存在
 
 ---
 

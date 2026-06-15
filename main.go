@@ -365,6 +365,8 @@ func initDB() error {
 		// 區分 qr_codes 的用途：'register'（掃碼註冊）vs 'relogin'（重新登入）。
 		// 舊資料列預設為 'register'，避免 relogin code 被拿去 /auth/register 重放。
 		"ALTER TABLE qr_codes ADD COLUMN kind TEXT DEFAULT 'register'",
+		// JWT 撤銷用：簽發時間早於此 Unix 秒數的 token 一律視為已撤銷（0＝未撤銷）。
+		"ALTER TABLE accounts ADD COLUMN tokens_valid_after INTEGER DEFAULT 0",
 	}
 	for _, m := range migrations {
 		db.Exec(m) // 忽略錯誤：欄位已存在時 SQLite 會回傳錯誤，屬正常情況
@@ -408,8 +410,9 @@ func extractToken(r *http.Request) string {
 		return cookie.Value
 	}
 
-	// 從 URL 參數提取
-	return r.URL.Query().Get("token")
+	// 已移除 ?token= URL 參數回退：避免長效 90 天 JWT 出現在網址
+	// （會進 Cloudflare edge log / 瀏覽器歷史 / Referer）。認證只接受 Header 或 Cookie。
+	return ""
 }
 
 // 認證中間件：檢查用戶是否已登入
@@ -441,15 +444,29 @@ func authMiddleware(next http.HandlerFunc, requiredLevel string) http.HandlerFun
 			return
 		}
 
-		// 檢查帳號狀態
+		// 檢查帳號狀態 + JWT 撤銷狀態
 		var status string
-		err = db.QueryRow("SELECT status FROM accounts WHERE account_id = ?", claims.AccountID).Scan(&status)
+		var tokensValidAfter int64
+		err = db.QueryRow(
+			"SELECT status, tokens_valid_after FROM accounts WHERE account_id = ?", claims.AccountID,
+		).Scan(&status, &tokensValidAfter)
 		if err != nil || status != "active" {
 			sendJSON(w, http.StatusForbidden, APIResponse{
 				Status: "error",
 				Error:  "帳號未啟用或已被停用",
 			})
 			logAudit(claims.AccountID, "auth_check", r.URL.Path, r.RemoteAddr, claims.DeviceID, "denied", "account_inactive")
+			return
+		}
+
+		// 撤銷檢查：帳號設了 tokens_valid_after，且此 token 簽發時間早於它 → 已被撤銷。
+		// 一次 UPDATE 即可讓該帳號所有舊 token 失效（處理憑證外洩）；使用者重新登入取得 iat 較新的 token 即可恢復。
+		if tokensValidAfter > 0 && claims.IssuedAt != nil && claims.IssuedAt.Time.Unix() < tokensValidAfter {
+			sendJSON(w, http.StatusUnauthorized, APIResponse{
+				Status: "error",
+				Error:  "Token 已被撤銷，請重新登入",
+			})
+			logAudit(claims.AccountID, "auth_check", r.URL.Path, r.RemoteAddr, claims.DeviceID, "denied", "token_revoked")
 			return
 		}
 
@@ -1025,6 +1042,35 @@ func deleteAccountHandler(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, http.StatusOK, APIResponse{Status: "success", Message: fmt.Sprintf("帳號 %s 已刪除", req.AccountID)})
 }
 
+// POST /admin/revoke-sessions — 撤銷指定帳號目前所有 token（憑證外洩時用）。
+// 將 tokens_valid_after 設為現在：所有簽發時間更早的 token 立即失效；使用者重新登入即可恢復。
+func revokeSessionsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		sendJSON(w, http.StatusMethodNotAllowed, APIResponse{Status: "error", Error: "只接受 POST"})
+		return
+	}
+	var req struct {
+		AccountID string `json:"account_id"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.AccountID == "" {
+		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "account_id 為必填"})
+		return
+	}
+	var exists int
+	if err := db.QueryRow("SELECT COUNT(*) FROM accounts WHERE account_id = ?", req.AccountID).Scan(&exists); err != nil || exists == 0 {
+		sendJSON(w, http.StatusNotFound, APIResponse{Status: "error", Error: "找不到此帳號"})
+		return
+	}
+	db.Exec("UPDATE accounts SET tokens_valid_after = ? WHERE account_id = ?", time.Now().Unix(), req.AccountID)
+	db.Exec("DELETE FROM sessions WHERE account_id = ?", req.AccountID)
+	logAudit("admin", "revoke_sessions", req.AccountID, r.RemoteAddr, "", "success", "")
+	sendJSON(w, http.StatusOK, APIResponse{
+		Status:  "success",
+		Message: fmt.Sprintf("已撤銷帳號 %s 的所有登入，使用者需重新登入", req.AccountID),
+	})
+}
+
 // 驗證 Token（手機端可用此端點確認 token 是否有效）
 func verifyTokenHandler(w http.ResponseWriter, r *http.Request) {
 	accountID := r.Header.Get("X-Account-ID")
@@ -1181,13 +1227,7 @@ func reloginCodeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	code := generateSecureKey(16)
-	qrCodeID := generateID("relogin")
-	expiresAt := time.Now().Add(5 * time.Minute)
-	_, err := db.Exec(`
-		INSERT INTO qr_codes (qr_code_id, temp_key, account_id, generated_at, expires_at, used, kind)
-		VALUES (?, ?, ?, ?, ?, 0, 'relogin')
-	`, qrCodeID, code, req.AccountID, time.Now(), expiresAt)
+	code, expiresAt, err := insertOneTimeCode(req.AccountID, "relogin", 5*time.Minute)
 	if err != nil {
 		sendJSON(w, http.StatusInternalServerError, APIResponse{Status: "error", Error: err.Error()})
 		return
@@ -1223,7 +1263,7 @@ func reloginHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		code := r.URL.Query().Get("code")
-		accountID, ok := lookupReloginCode(code)
+		accountID, ok := lookupOneTimeCode(code, "relogin")
 		if !ok {
 			reloginErrorPage(w, "連結無效、已使用或已過期，請回電腦端重新產生。")
 			return
@@ -1244,20 +1284,8 @@ func reloginHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 原子性消耗：唯一一筆 used=0 且未過期的 relogin code 才會被消耗。
-		mu.Lock()
-		res, _ := db.Exec(
-			"UPDATE qr_codes SET used = 1, used_at = ? WHERE temp_key = ? AND used = 0 AND kind = 'relogin' AND expires_at > ?",
-			time.Now(), code, time.Now())
-		var affected int64
-		if res != nil {
-			affected, _ = res.RowsAffected()
-		}
-		var accountID string
-		if affected == 1 {
-			db.QueryRow("SELECT account_id FROM qr_codes WHERE temp_key = ?", code).Scan(&accountID)
-		}
-		mu.Unlock()
-		if affected != 1 || accountID == "" {
+		accountID, ok := consumeOneTimeCode(code, "relogin")
+		if !ok {
 			reloginErrorPage(w, "連結無效、已使用或已過期，請回電腦端重新產生。")
 			return
 		}
@@ -1304,20 +1332,55 @@ func reloginHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// lookupReloginCode 僅驗證（不消耗）一枚有效的 relogin code，回傳其 account_id。
-func lookupReloginCode(code string) (string, bool) {
+// --- 一次性 code 共用工具（relogin / e2e 等流程共用，以 kind 區分）---
+
+// insertOneTimeCode 鑄造一枚一次性 code 存入 qr_codes，回傳 (code, 到期時間)。
+func insertOneTimeCode(accountID, kind string, ttl time.Duration) (string, time.Time, error) {
+	code := generateSecureKey(16)
+	expiresAt := time.Now().Add(ttl)
+	_, err := db.Exec(`
+		INSERT INTO qr_codes (qr_code_id, temp_key, account_id, generated_at, expires_at, used, kind)
+		VALUES (?, ?, ?, ?, ?, 0, ?)
+	`, generateID(kind), code, accountID, time.Now(), expiresAt, kind)
+	return code, expiresAt, err
+}
+
+// lookupOneTimeCode 僅驗證（不消耗）一枚指定 kind 的有效 code，回傳其 account_id。
+func lookupOneTimeCode(code, kind string) (string, bool) {
 	if code == "" {
 		return "", false
 	}
 	var accountID string
 	err := db.QueryRow(
-		"SELECT account_id FROM qr_codes WHERE temp_key = ? AND kind = 'relogin' AND used = 0 AND expires_at > ?",
-		code, time.Now(),
+		"SELECT account_id FROM qr_codes WHERE temp_key = ? AND kind = ? AND used = 0 AND expires_at > ?",
+		code, kind, time.Now(),
 	).Scan(&accountID)
 	if err != nil {
 		return "", false
 	}
 	return accountID, true
+}
+
+// consumeOneTimeCode 原子性消耗一枚指定 kind 的有效 code（單次使用），回傳其 account_id。
+func consumeOneTimeCode(code, kind string) (string, bool) {
+	if code == "" {
+		return "", false
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	res, _ := db.Exec(
+		"UPDATE qr_codes SET used = 1, used_at = ? WHERE temp_key = ? AND used = 0 AND kind = ? AND expires_at > ?",
+		time.Now(), code, kind, time.Now())
+	var affected int64
+	if res != nil {
+		affected, _ = res.RowsAffected()
+	}
+	if affected != 1 {
+		return "", false
+	}
+	var accountID string
+	db.QueryRow("SELECT account_id FROM qr_codes WHERE temp_key = ?", code).Scan(&accountID)
+	return accountID, accountID != ""
 }
 
 // reloginCSRF 以 serverSecret 對 code 簽章，作為確認表單的 CSRF token（同步器 token 模式）。
@@ -1369,6 +1432,95 @@ p{color:#9aa3c8;font-size:14px;margin:0;line-height:1.5}
 func htmlEscape(s string) string {
 	r := strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;", `"`, "&quot;", "'", "&#39;")
 	return r.Replace(s)
+}
+
+// --- E2E 測試頁憑證交換（避免把長效 token/secret 放進 URL）---
+//
+// 舊作法把 session_token + device_secret 直接塞進 /e2e-test?token=&secret=（會外洩到 log/歷史/Referer）。
+// 改為：面板（adminGate）鑄造一次性 e2e code → 測試頁開 /e2e-test?code=...（URL 只含短效一次性 code）
+// → 頁面 POST /e2e-test/exchange { code } 於「回應 body」換回憑證（不入 URL）。
+
+// POST /admin/e2e-code — 為 active 帳號鑄造一次性 e2e code（供測試頁換取憑證）。
+func e2eCodeHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		sendJSON(w, http.StatusMethodNotAllowed, APIResponse{Status: "error", Error: "只接受 POST"})
+		return
+	}
+	var req struct {
+		AccountID string `json:"account_id"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	if req.AccountID == "" {
+		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "account_id 為必填"})
+		return
+	}
+	var status string
+	if err := db.QueryRow("SELECT status FROM accounts WHERE account_id = ?", req.AccountID).Scan(&status); err != nil {
+		sendJSON(w, http.StatusNotFound, APIResponse{Status: "error", Error: "找不到此帳號"})
+		return
+	}
+	if status != "active" {
+		sendJSON(w, http.StatusConflict, APIResponse{Status: "error", Error: fmt.Sprintf("帳號狀態為 %s，非 active", status)})
+		return
+	}
+	code, expiresAt, err := insertOneTimeCode(req.AccountID, "e2e", 5*time.Minute)
+	if err != nil {
+		sendJSON(w, http.StatusInternalServerError, APIResponse{Status: "error", Error: err.Error()})
+		return
+	}
+	logAudit("admin", "mint_e2e_code", req.AccountID, r.RemoteAddr, "", "success", "")
+	sendJSON(w, http.StatusOK, APIResponse{
+		Status: "success",
+		Data: map[string]string{
+			"account_id": req.AccountID,
+			"code":       code,
+			"expires_at": expiresAt.Format("2006-01-02 15:04:05"),
+		},
+	})
+}
+
+// POST /e2e-test/exchange — 公開端點。以一次性 e2e code 換取 session_token + device_secret（於回應 body）。
+func e2eExchangeHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store, private")
+	if r.Method != http.MethodPost {
+		sendJSON(w, http.StatusMethodNotAllowed, APIResponse{Status: "error", Error: "只接受 POST"})
+		return
+	}
+	var req struct {
+		Code string `json:"code"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	accountID, ok := consumeOneTimeCode(req.Code, "e2e")
+	if !ok {
+		sendJSON(w, http.StatusBadRequest, APIResponse{Status: "error", Error: "code 無效、已使用或已過期"})
+		return
+	}
+	var deviceID, permission, status, deviceSecret string
+	err := db.QueryRow(
+		"SELECT device_id, permission_level, status, device_secret FROM accounts WHERE account_id = ?", accountID,
+	).Scan(&deviceID, &permission, &status, &deviceSecret)
+	if err != nil || status != "active" {
+		sendJSON(w, http.StatusForbidden, APIResponse{Status: "error", Error: "帳號未啟用或不存在"})
+		return
+	}
+	if permission == "" {
+		permission = "L2"
+	}
+	// serverSecret 每次重啟更換 → 重簽新 JWT，確保對目前 secret 有效。
+	token, err := generateJWT(accountID, deviceID, permission, 90*24*time.Hour)
+	if err != nil {
+		sendJSON(w, http.StatusInternalServerError, APIResponse{Status: "error", Error: "JWT 生成失敗"})
+		return
+	}
+	logAudit(accountID, "e2e_exchange", "account", r.RemoteAddr, deviceID, "success", "")
+	sendJSON(w, http.StatusOK, APIResponse{
+		Status: "success",
+		Data: map[string]string{
+			"account_id":    accountID,
+			"session_token": token,
+			"device_secret": deviceSecret,
+		},
+	})
 }
 
 // --- 需認證的端點 ---
@@ -1972,65 +2124,78 @@ func main() {
 	// 路由設定
 	// ==================
 
-	// 公開端點（無需認證）
-	http.HandleFunc("/health", healthHandler)
-	http.HandleFunc("/auth/register", registerDeviceHandler)
-	http.HandleFunc("/auth/poll", pollStatusHandler)
-	http.HandleFunc("/auth/relogin", reloginHandler)                            // 重新登入（自我授權於一次性 code）
-	http.HandleFunc("/api/public-key", publicKeyHandler)                        // RSA E2E 公鑰（前端加密用）
-	http.HandleFunc("/e2e-test", func(w http.ResponseWriter, r *http.Request) { // E2E 加密測試頁（開發用）
+	// 兩個獨立 mux：
+	//  publicMux → :8081（經 Cloudflare Tunnel 對外）
+	//  adminMux  → 127.0.0.1:8082（僅本機；tunnel 物理上碰不到 /admin/*）
+	publicMux := http.NewServeMux()
+	adminMux := http.NewServeMux()
+
+	// 公開端點（無需認證；對外）
+	publicMux.HandleFunc("/health", healthHandler)
+	publicMux.HandleFunc("/auth/register", registerDeviceHandler)
+	publicMux.HandleFunc("/auth/poll", pollStatusHandler)
+	publicMux.HandleFunc("/auth/relogin", reloginHandler)                            // 重新登入（自我授權於一次性 code）
+	publicMux.HandleFunc("/api/public-key", publicKeyHandler)                        // RSA E2E 公鑰（前端加密用）
+	publicMux.HandleFunc("/e2e-test", func(w http.ResponseWriter, r *http.Request) { // E2E 加密測試頁（開發用）
 		http.ServeFile(w, r, "e2e_test.html")
 	})
+	publicMux.HandleFunc("/e2e-test/exchange", e2eExchangeHandler) // 以一次性 code 換 E2E 測試憑證（不入 URL）
 
-	// 管理端點（電腦端調用）：全部以 adminGate 保護，僅本機控制面板（持 X-Admin-Token）可呼叫。
-	http.HandleFunc("/admin/generate-qr", adminGate(generateQRHandler))
-	http.HandleFunc("/admin/pending", adminGate(pendingAccountsHandler))
-	http.HandleFunc("/admin/approve", adminGate(approveAccountHandler))
-	http.HandleFunc("/admin/accounts", adminGate(listAccountsHandler))
-	http.HandleFunc("/admin/logs", adminGate(viewLogsHandler))
-	http.HandleFunc("/admin/account-secrets", adminGate(accountSecretsHandler)) // 供控制面板取得 token+secret 開啟 E2E 測試頁
-	http.HandleFunc("/admin/delete-account", adminGate(deleteAccountHandler))   // 刪除帳號
-	http.HandleFunc("/admin/relogin-code", adminGate(reloginCodeHandler))       // 為既有帳號產生重新登入連結
-
-	// 需認證的端點
-	http.HandleFunc("/auth/verify", authMiddleware(verifyTokenHandler, "L1"))
-	http.HandleFunc("/api/chat", authMiddleware(chatHandler, "L2"))
-	http.HandleFunc("/api/e2e/chat", authMiddleware(e2eChatHandler, "L2"))
-	http.HandleFunc("/api/conversations", authMiddleware(myConversationsHandler, "L1"))
-	http.HandleFunc("/api/llama/", authMiddleware(proxyToLlamaAuthenticated, "L2"))
-
+	// 需認證的端點（公開 mux）
+	publicMux.HandleFunc("/auth/verify", authMiddleware(verifyTokenHandler, "L1"))
+	publicMux.HandleFunc("/api/chat", authMiddleware(chatHandler, "L2"))
+	publicMux.HandleFunc("/api/e2e/chat", authMiddleware(e2eChatHandler, "L2"))
+	publicMux.HandleFunc("/api/conversations", authMiddleware(myConversationsHandler, "L1"))
+	publicMux.HandleFunc("/api/llama/", authMiddleware(proxyToLlamaAuthenticated, "L2"))
 	// 根路徑與前端資源服務 forked UI；其餘請求轉發 llama.cpp（皆需認證）
-	http.HandleFunc("/", authMiddleware(uiOrProxyHandler, "L1"))
+	publicMux.HandleFunc("/", authMiddleware(uiOrProxyHandler, "L1"))
 
-	// 啟動
+	// 管理端點：只在 127.0.0.1:8082 上服務（不對 tunnel 暴露）；仍保留 adminGate 做縱深防禦
+	// （擋掉本機其他程序在未持 token 下呼叫）。
+	adminMux.HandleFunc("/admin/generate-qr", adminGate(generateQRHandler))
+	adminMux.HandleFunc("/admin/pending", adminGate(pendingAccountsHandler))
+	adminMux.HandleFunc("/admin/approve", adminGate(approveAccountHandler))
+	adminMux.HandleFunc("/admin/accounts", adminGate(listAccountsHandler))
+	adminMux.HandleFunc("/admin/logs", adminGate(viewLogsHandler))
+	adminMux.HandleFunc("/admin/account-secrets", adminGate(accountSecretsHandler)) // 取得 token+secret（手動）
+	adminMux.HandleFunc("/admin/delete-account", adminGate(deleteAccountHandler))   // 刪除帳號
+	adminMux.HandleFunc("/admin/relogin-code", adminGate(reloginCodeHandler))       // 為既有帳號產生重新登入連結
+	adminMux.HandleFunc("/admin/e2e-code", adminGate(e2eCodeHandler))               // 為 E2E 測試頁產生一次性憑證 code
+	adminMux.HandleFunc("/admin/revoke-sessions", adminGate(revokeSessionsHandler)) // 撤銷帳號所有 token（憑證外洩時用）
+
+	// 啟動：管理 API 先在背景起（只綁 loopback），公開服務在前景。
+	const adminAddr = "127.0.0.1:8082"
 	port := ":8081"
+
+	go func() {
+		log.Printf("🔧 管理 API 監聽 %s（僅本機，不對外；/admin/* 仍需 X-Admin-Token）\n", adminAddr)
+		if err := http.ListenAndServe(adminAddr, loggingMiddleware(adminMux)); err != nil {
+			log.Fatalf("管理 API 啟動失敗: %v\n", err)
+		}
+	}()
+
 	log.Println("")
-	log.Printf("🚀 代理層監聽在 %s\n", port)
+	log.Printf("🚀 代理層監聽在 %s（對外，經 Tunnel）\n", port)
 	log.Println("")
 	log.Println("📌 公開端點:")
 	log.Printf("   健康檢查:     GET  http://127.0.0.1%s/health\n", port)
 	log.Printf("   設備註冊:     POST http://127.0.0.1%s/auth/register\n", port)
 	log.Println("")
-	log.Println("🔧 管理端點（電腦端）:")
-	log.Printf("   生成 QR Code: POST http://127.0.0.1%s/admin/generate-qr\n", port)
-	log.Printf("   待審批帳號:   GET  http://127.0.0.1%s/admin/pending\n", port)
-	log.Printf("   核准帳號:     POST http://127.0.0.1%s/admin/approve\n", port)
-	log.Printf("   所有帳號:     GET  http://127.0.0.1%s/admin/accounts\n", port)
-	log.Printf("   審計日誌:     GET  http://127.0.0.1%s/admin/logs\n", port)
-	log.Printf("   帳號憑證:     GET  http://127.0.0.1%s/admin/account-secrets?account_id=xxx\n", port)
+	log.Println("🔧 管理端點（僅本機 127.0.0.1:8082，需 X-Admin-Token）:")
+	log.Printf("   生成 QR Code: POST http://%s/admin/generate-qr\n", adminAddr)
+	log.Printf("   核准帳號:     POST http://%s/admin/approve\n", adminAddr)
+	log.Printf("   所有帳號:     GET  http://%s/admin/accounts\n", adminAddr)
+	log.Printf("   撤銷登入:     POST http://%s/admin/revoke-sessions\n", adminAddr)
 	log.Println("")
-	log.Println("🔒 需認證端點:")
+	log.Println("🔒 需認證端點（Bearer Token 或 Cookie）:")
+	log.Printf("   驗證 Token:   GET  http://127.0.0.1%s/auth/verify\n", port)
 	log.Printf("   聊天:         POST http://127.0.0.1%s/api/chat\n", port)
-	log.Printf("   我的對話:     GET  http://127.0.0.1%s/api/conversations\n", port)
-	log.Println("")
-	log.Println("🔒 需認證端點（Bearer Token 必填）:")
-	log.Printf("   驗證 Token:     GET  http://127.0.0.1%s/auth/verify\n", port)
 	log.Println("")
 	log.Println("🌐 llama.cpp Web UI（需認證）:")
-	log.Printf("   http://127.0.0.1%s/  ← 需帶 Authorization: Bearer <token>\n", port)
+	log.Printf("   http://127.0.0.1%s/  ← 需帶 Authorization: Bearer <token> 或 Cookie\n", port)
 	log.Println("")
 
-	if err := http.ListenAndServe(port, loggingMiddleware(http.DefaultServeMux)); err != nil {
+	if err := http.ListenAndServe(port, loggingMiddleware(publicMux)); err != nil {
 		log.Fatalf("啟動失敗: %v\n", err)
 	}
 }

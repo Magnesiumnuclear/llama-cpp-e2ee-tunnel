@@ -140,6 +140,15 @@ Item {
                             onClicked: backend.openE2eTest(accountId)
                         }
                         GhostButton {
+                            iconName: "ban"
+                            text: "撤銷登入"
+                            visible: isActive
+                            onClicked: page.confirm.ask(
+                                "確認撤銷登入",
+                                "撤銷帳號「" + accountId + "」目前所有 token？\n所有裝置會立即登出，使用者需重新登入（用於憑證外洩時止血）。",
+                                function () { backend.revokeSessions(accountId); })
+                        }
+                        GhostButton {
                             iconName: "trash"
                             text: "刪除"
                             danger: true

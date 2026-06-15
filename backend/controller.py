@@ -494,25 +494,30 @@ class Controller(QObject):
         self.log_line(f"重新登入連結已產生：{account_id}", "action")
         self.refreshAccounts()
 
+    # ── 撤銷登入（JWT 撤銷）─────────────────────────────────────
+    @pyqtSlot(str)
+    def revokeSessions(self, account_id):
+        """撤銷該帳號目前所有 token（確認動作由 QML 負責）；使用者需重新登入。"""
+        ok, resp = http_post("/admin/revoke-sessions", {"account_id": account_id})
+        if ok and resp.get("status") == "success":
+            self.log_line(f"已撤銷登入：{account_id}（該帳號所有 token 失效）", "action")
+            self.refreshAccounts()
+        else:
+            self.warningRaised.emit(f"撤銷失敗：{resp.get('error') or resp.get('message')}")
+
     # ── E2E 測試頁開啟 ─────────────────────────────────────────
     @pyqtSlot(str)
     def openE2eTest(self, account_id):
-        """呼叫 /admin/account-secrets 取得 token+secret，並在瀏覽器開啟 /e2e-test。"""
-        ok, resp = http_get(f"/admin/account-secrets?account_id={account_id}")
+        """產生一次性 code 並開啟 /e2e-test?code=...；憑證由頁面向伺服器換取，不放進 URL。"""
+        ok, resp = http_post("/admin/e2e-code", {"account_id": account_id})
         if not ok or resp.get("status") != "success":
-            self.warningRaised.emit(f"無法取得帳號憑證：{resp.get('error') or resp.get('message')}")
+            self.warningRaised.emit(f"無法產生 E2E 測試連結：{resp.get('error') or resp.get('message')}")
             return
-        d = resp.get("data", {})
-        token = d.get("session_token", "")
-        secret = d.get("device_secret", "")
-        if not token or not secret:
-            self.warningRaised.emit("伺服器未回傳 session_token 或 device_secret，無法開啟測試頁。")
+        code = resp.get("data", {}).get("code", "")
+        if not code:
+            self.warningRaised.emit("伺服器未回傳 code，無法開啟測試頁。")
             return
-        url = (
-            f"{PROXY_BASE}/e2e-test"
-            f"?token={urllib.parse.quote(token, safe='')}"
-            f"&secret={urllib.parse.quote(secret, safe='')}"
-        )
+        url = f"{PROXY_BASE}/e2e-test?code={urllib.parse.quote(code, safe='')}"
         self.log_line(f"E2E 測試頁：{account_id}", "action")
         QDesktopServices.openUrl(QUrl(url))
 

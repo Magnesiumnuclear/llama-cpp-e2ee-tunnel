@@ -16,11 +16,11 @@ CREATE TABLE IF NOT EXISTS qr_codes (
     used           BOOLEAN DEFAULT 0,     -- 使用後立即設為 1（單次使用）
     used_at        TIMESTAMP,
     used_by_device TEXT,
-    kind           TEXT DEFAULT 'register' -- 'register'（掃碼註冊）/ 'relogin'（重新登入）
+    kind           TEXT DEFAULT 'register' -- 'register'（掃碼註冊）/ 'relogin'（重新登入）/ 'e2e'（E2E 測試憑證交換）
 );
 ```
 
-> `kind` 用來區分用途：`/auth/register` 只接受 `kind='register'`、`/auth/relogin` 只接受 `kind='relogin'`，避免重新登入 code 被重放到註冊流程而把 active 帳號打回待審。舊資料庫由啟動時的 `ALTER TABLE` 自動補上（預設 `register`）。
+> `kind` 用來區分一次性 code 的用途，各流程只接受自己的 kind（`/auth/register`→`register`、`/auth/relogin`→`relogin`、`/e2e-test/exchange`→`e2e`），避免 code 被跨流程重放（例如重新登入 code 被拿去註冊流程把 active 帳號打回待審）。舊資料庫由啟動時的 `ALTER TABLE` 自動補上（預設 `register`）。
 
 ### 2. accounts — 帳號與設備資訊
 
@@ -35,7 +35,8 @@ CREATE TABLE IF NOT EXISTS accounts (
     -- status 可為: pending_approval / active / disabled / rejected
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     approved_at      TIMESTAMP,
-    last_login       TIMESTAMP            -- 每次「重新登入」(/auth/relogin) 成功時更新
+    last_login       TIMESTAMP,           -- 每次「重新登入」(/auth/relogin) 成功時更新
+    tokens_valid_after INTEGER DEFAULT 0  -- JWT 撤銷：簽發時間(iat)早於此 Unix 秒數的 token 一律失效（0＝未撤銷）
 );
 ```
 
